@@ -179,6 +179,22 @@
 > live 2026-08-08 — V2.10 accepted.** **Next up: V2.12 (Command palette)** — see PLAN_V2.md's
 > `## V2.12 — Command palette` section; `Ctrl+K` doesn't exist at all today.
 >
+> **2026-08-09, same branch, a live-found bug fix, not v2 work (D116).** You caught the Overview
+> page's "Today's caps" tile showing Scrape at 200/300 for 2026-08-08 while the same page's live
+> "Recent" tile already showed a notification saying the real cap (300) had been reached. The
+> notification was right; the tile was stale — `burndownProvider` is a plain, never-invalidated
+> `FutureProvider`, fetched once per app session, so "today"'s number just freezes at whatever it
+> was on first load while the day's flows keep running. Fixed by having `CapsTile` prefer the
+> scheduler heartbeat's already-live `today` figures (the same `flows.state` WS data `FlowCard`'s
+> own counters already use) for the headline bar/count, falling back to the burndown snapshot's
+> last day only until that live data arrives; the 7-day sparkline trend is untouched, since past
+> days don't change. `flutter analyze` clean, `flutter test` 210/211 (D114's same pre-existing,
+> unrelated `shell_layout_test.dart` failure, reconfirmed via `git stash`). Built and started for
+> you per rule 5. **The Android phone is disconnected indefinitely (your own call, to pause the
+> pipeline for a few days)** — see D116 for what that means for checkpoint-testing this live, and
+> flag anything you need from the pipeline/device side in the meantime so it can be planned around
+> together rather than assumed.
+>
 > **Scope boundary: v2 is entirely inside `app/`.** No agent, pipeline, helm or mobile
 > changes; no redeploys; no cross-repo branches. Every piece of data the redesign needs is
 > already served by an existing endpoint. If a checkpoint seems to need an agent change, it

@@ -5,6 +5,170 @@ session can tell a settled question from an open one.
 
 ---
 
+## 2026-08-09 — adb self-heal crash-looped forever once the phone was disconnected, colliding with a stray external `adb start-server` it could never recognize (D117)
+
+### D117 · Two chained self-heal bugs, both only reachable with no phone attached: blind respawn colliding with a stray external adb daemon, and a 60s restart-forever loop against a perfectly healthy server
+
+**Reported live**, with the exact log lines: `adb` was crash-looping every ~60s —
+`could not install *smartsocket* listener: cannot bind to 0.0.0.0:5037: Only one usage of each
+socket address... (10048)`, `process exited with code 3221226505`, `self-heal: restarting in 60s`,
+forever, starting right after you disconnected the Android phone (your own deliberate call, to
+pause the pipeline for a few days — see D116's same context). Your own framing, once the shape of
+the bug was clear: on this machine port 5037 is always meant to belong to this service — if
+anything else is ever found holding it, just kill it and let the app run its own copy. That
+directive is exactly what both fixes below implement.
+
+**Bug 1, diagnosed live, not guessed**: `GET /api/services` showed `adb` in `state: "backoff"`,
+`origin: "none"`, `port_owner: null` — yet its own `probe.detail` said `"tcp 127.0.0.1:5037 open;
+device ... not attached (saw none)"`, i.e. the raw TCP port genuinely was listening the whole
+time. `Get-NetTCPConnection`/`Get-CimInstance Win32_Process` confirmed the real owner: PID 4244,
+command line `adb -L tcp:5037 fork-server server --reply-fd 868` — not our supervised
+`-a nodaemon server start` invocation at all. That command line is ADB's own built-in
+"no server found, auto-start one" client behavior — some other tool that shells out to plain
+`adb` (VS Code's Dart/Flutter extension, `flutter devices`, or any manual `adb` command — this
+machine runs Flutter dev tooling in the same session) auto-spawned its own detached background
+daemon into a gap where our supervised server happened to be down, and that daemon then persisted
+indefinitely, permanently squatting on the port.
+
+**Root cause: `ManagedService._probe_idle()`'s self-heal branch, and `Supervisor.start()`'s own
+boot-time bootstrap, both gated "is someone else already on this port?" behind the *compound*
+probe result** (`ProbeResult.ok`, TCP-open AND `probe_extra`), not the raw port-open signal alone.
+`adb`'s `probe_extra` (`adb_device_present`) can never pass while no phone is attached, so
+`self.probe.ok` can never be True, so `detect_external()` (the one thing that would have
+recognized "a real, functioning adb server already owns this port, don't spawn a second one") was
+never reached at either call site. Self-heal just blindly re-spawned on top of the live foreign
+daemon every retry, and every spawn crashed on the identical bind conflict, forever.
+
+**Fixed at both call sites** by checking raw port ownership (`_port_owner()`, the same lookup
+`detect_external()` already uses internally) independently of the compound probe — `_probe_idle()`
+checks it before calling `_spawn()` and calls `detect_external()` + `takeover()` instead of
+colliding if someone else holds it; `Supervisor.start()` calls `detect_external()`
+unconditionally for an unadopted service (not gated behind `probe.ok` first) and, when the result
+is `EXTERNAL` with the service's own `autostart`+`self_heal` both on, takes it over immediately
+rather than leaving it for a human to notice and click "Takeover" — the same "self-heal means truly
+unattended recovery" standard this codebase already set at D74/D82/D91.
+
+**Bug 2, found while verifying the live fix for Bug 1, not reported by you**: `restart_count`
+climbed from 0 to 51 over about 27 minutes on the live machine — `adb` was alive, correctly
+supervised, its port genuinely open the whole time, yet self-heal kept killing and respawning it
+anyway. Root cause: `_probe_alive()`'s "wedged" self-heal (`unhealthy_grace`, 60s by default) fires
+whenever the *compound* probe fails continuously, which is exactly `adb`'s permanent state with no
+phone attached — the mechanism built to catch a process that holds its port but answers nothing
+was instead firing on a process answering exactly what it should (no device), forever, for as long
+as the phone stays disconnected. Each of those restarts also reopened Bug 1's exact collision
+window, so this wasn't just noise — it was actively re-triggering the original failure mode on a
+schedule.
+
+**Fixed by adding `ProbeResult.transport_ok`** (`probes.py`) — the transport-level check (TCP
+connect / HTTP GET) alone, captured before `probe_extra` is ever consulted — and keying the wedge-
+restart timer off *that* instead of the compound `ok`, resetting it the instant the transport
+recovers (mirroring `_healthy_since`'s existing pattern) so a real, sustained transport failure
+still restarts on schedule exactly as before, but a semantic-only failure like "no device" never
+does.
+
+**That fix's own first version had a real flaw, caught by its own regression test flaking, not by
+you**: it reused the *existing* `_unhealthy_since` timestamp (set once, back when the compound
+probe first failed) as the elapsed-time base for the new `transport_ok` check, rather than tracking
+"how long has the transport itself been continuously failing" as its own independent clock. That
+meant a single transient transport hiccup — one slow probe under load, not a real failure — could
+immediately satisfy an already-elapsed grace window and restart, instead of requiring the
+transport to actually be down for the full `unhealthy_grace`. Fixed by tying `_unhealthy_since`'s
+reset directly to `transport_ok` (reset to `None` the instant it's True, same tick discipline as
+`_healthy_since`), so it now measures continuous transport failure specifically, never a stale
+timestamp left over from an unrelated compound-probe failure.
+
+**Chasing that flake down also surfaced a test-design bug, not a supervisor bug**: the regression
+test's own `start_grace=0.5`/`unhealthy_grace=1.0` were tuned far tighter than a real subprocess
+spawn can guarantee — instrumenting the exact tick sequence showed the blocking spawn handshake
+alone (subprocess creation, ConPTY setup, interpreter start) taking over 2 seconds by itself under
+a loaded test run (16 prior sections' worth of process churn happening moments before), well past
+either constant. The fix logic was correct throughout; the test was racing real, if slow, spawn
+latency against unrealistically tight timers. Rewritten to wait for the transport to genuinely come
+up first (decoupled from spawn-latency variance entirely) before starting the "assert no restart"
+window, rather than trying to out-guess real-world timing with bigger constants.
+
+**Verified, in order:** four new regression checks in `agent/tests/test_supervisor.py` — #15
+reproduces Bug 1 exactly (spawns a real conflicting process during a service's `BACKOFF` wait,
+confirms self-heal reclaims it instead of crash-looping); #16 the same at `Supervisor.start()`'s
+boot path; #17 reproduces Bug 2 (a `probe_extra` that never passes, confirms zero restarts over a
+window comfortably past `unhealthy_grace`, redesigned as above once its first version flaked under
+load for the reason described). Full suite, final and clean: **80/80** (was 57 before this session
+— corrected in `agent/tests/README.md`). `ruff check` clean throughout every round.
+
+**Verified against the real live machine, twice** — once after Bug 1's fix alone (confirmed it
+reclaimed PID 4244 cleanly, `origin: "supervised"`, narrated `"reclaiming port 5037 from an
+external process found already listening at startup"` in its own log), and again after Bug 2's fix
+once the live `restart_count: 51`/uptime reset every ~30s made that second bug undeniable on the
+running system too. Restarted `ia-agent.exe` (`taskkill /F`, the launcher respawned it in ~3s per
+the established D21 pattern) with both fixes applied; the adb service adopted its already-running,
+already-reclaimed process (`origin: "adopted"`, same pid, uptime carried over — the correct D22
+behavior, no needless respawn) and settled into `state: "unhealthy"` (port open, no device attached
+— the correct, expected state with the phone unplugged, not a crash loop) with `restart_count: 0`
+and no further cycling observed over the following watch window. No pipeline/cross-repo change
+needed; this was entirely inside the agent.
+
+---
+
+## 2026-08-09 — Overview's "Today's caps" tile could contradict a live notification on the same screen (D116)
+
+### D116 · `CapsTile`'s "today" figure now reads from the live scheduler heartbeat, not the once-per-session burndown fetch
+
+**Not v2 work, a live-found bug fix — a deliberate one-session deviation from the v2 sequence, same standing precedent as D113.** V2.12 (Command palette) is still next whenever this branch resumes the checklist.
+
+**Reported live, with a screenshot**: the Overview page's "Today's caps" tile showed Scrape at
+200/300 for 2026-08-08, while the "Recent" tile on the same page — fed live over the
+`notifications` WS channel — showed "Scrape limit reached for 2026-08-08. Limit: 300", delivered
+minutes earlier. Investigated by querying the real Prefect API (27 non-overlapping `entity-scrape`
+runs that day, ruling out a concurrent-run write race) and the agent's own `/api/insights/burndown`
+directly, which returned the correct, current value: `{"date": "2026-08-08", "scraped": 300,
+"processed": 414}`. **The notification was correct; the tile was stale — not a pipeline/DB bug at
+all.**
+
+**Root cause: `burndownProvider` (`insights_controller.dart`) is a plain, non-`autoDispose`
+`FutureProvider` — fetched once, cached for the rest of the app's process lifetime, and never
+invalidated automatically anywhere.** Its own doc comment says "fetched once per screen visit,
+refreshed by invalidating this provider... nothing about the underlying Postgres data changes fast
+enough to justify a WS channel or a timer" — a reasonable call for the Insights page, which the
+user visits briefly and can hit an explicit retry button on. It was wrong for the Overview tile,
+which sits open on screen for hours at a time and, unlike Insights, has no retry affordance at
+all — so its "today" number just freezes at whatever it was on first load and silently drifts
+further from reality as the day's flows keep running, eventually landing right next to a live
+notification that visibly contradicts it.
+
+**Fixed by sourcing "today" from data that's already live, not by adding a new poll/timer.** The
+scheduler heartbeat (`controllers/prefect.py`'s `_today()`, posted to the agent every ~2s and
+already mirrored into the app via the existing `flows.state` WS channel and
+`flowsControllerProvider` — the same live source `FlowCard`'s own counters use) already carries
+exactly this number (`{"scraped": scrape.scraped, "limit": ...}` etc.) for every flow with a daily
+cap. `CapsTile` now takes an optional `liveFlows` map and prefers
+`liveFlows[flow]?.today[field]` for the headline bar/count, falling back to the burndown history's
+last day only while the live snapshot hasn't loaded yet. The 7-day sparkline trend is untouched —
+still from `burndownProvider`, since past days are immutable once the calendar day rolls over, and
+only "today" was ever the volatile, wrong number.
+
+**Rejected:** polling `burndownProvider` on a timer, or invalidating it on notification arrival —
+both would still be a second, redundant round trip for data the app already has live via the
+heartbeat it already subscribes to for the Pipeline tile one row above.
+
+**Verified:** `flutter analyze` clean; `flutter test` 210/211 (the one `shell_layout_test.dart`
+failure reconfirmed pre-existing via `git stash` — identical failure on the unmodified branch tip,
+unrelated to this change); `overview_layout_test.dart`'s 11 cases all still pass unchanged, since
+they already exercise `CapsTile` through `_CapsTile` with `flowsControllerProvider` unoverridden
+(falls back to burndown, matching the old behavior exactly when no live snapshot exists). Verified
+against the real running agent's `/api/insights/burndown` and Prefect's real flow-run history
+directly, read-only — no ops action taken, no code touched outside `app/`. Built and started for
+you per rule 5 — not clicked through by Claude.
+
+**The Android phone is disconnected indefinitely (your own call, to pause flows for a few days)**,
+so this can't be checkpoint-tested against a *live* run reaching a cap the way it would normally be
+verified — nothing will scrape/follow/scan while it's off. What you *can* still confirm without the
+phone: open Overview and confirm "Today's caps" now shows figures consistent with yesterday's
+(2026-08-08) real totals (`Scrape 300/300`, `Follow 155/60` — over cap by design, `Scan · profiles
+2/10`, from the burndown numbers pulled above) rather than a lower stale count. A true live-updating
+check (numbers ticking up in real time as a flow runs) is what's left open until the phone is back.
+
+---
+
 ## 2026-08-08 — V2.10, Library review mode (D115)
 
 ### D115 · A full-window keep/discard decision buffer for one `(folder, entity)` at a time, writing only through the existing `POST /api/library/apply`; the double-click lightbox lands in the same session

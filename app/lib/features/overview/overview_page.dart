@@ -250,10 +250,14 @@ class _CapsTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(burndownProvider);
+    final liveFlows = ref.watch(flowsControllerProvider).value?.flows;
     return _Tile(
       title: "Today's caps",
       navIndex: insightsIndex,
-      child: async.stateView(describeError: describeInsightsError, data: (burndown) => CapsTile(burndown: burndown)),
+      child: async.stateView(
+        describeError: describeInsightsError,
+        data: (burndown) => CapsTile(burndown: burndown, liveFlows: liveFlows),
+      ),
     );
   }
 }

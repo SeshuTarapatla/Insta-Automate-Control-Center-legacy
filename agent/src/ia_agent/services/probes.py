@@ -13,6 +13,13 @@ class ProbeResult:
     latency_ms: float
     detail: str
     at: float
+    # The transport-level check alone (TCP connect / HTTP GET), before `extra`
+    # is consulted — `ok` above is compound and can stay False forever for a
+    # reason that has nothing to do with the transport (adb's device-attached
+    # check with no phone plugged in, found live 2026-08-09), so anything that
+    # means "is this process genuinely wedged, not just semantically
+    # incomplete" needs this instead of `ok`.
+    transport_ok: bool
 
     def as_dict(self) -> dict:
         return {
@@ -57,6 +64,7 @@ async def run_probe(probe: HealthProbe, extra: ExtraProbe | None = None) -> Prob
         ok, detail = await _http(probe)
     else:
         ok, detail = await _tcp(probe)
+    transport_ok = ok
 
     if ok and extra is not None:
         try:
@@ -66,5 +74,9 @@ async def run_probe(probe: HealthProbe, extra: ExtraProbe | None = None) -> Prob
         detail = f"{detail}; {extra_detail}"
 
     return ProbeResult(
-        ok=ok, latency_ms=(time.perf_counter() - started) * 1000, detail=detail, at=time.time()
+        ok=ok,
+        transport_ok=transport_ok,
+        latency_ms=(time.perf_counter() - started) * 1000,
+        detail=detail,
+        at=time.time(),
     )

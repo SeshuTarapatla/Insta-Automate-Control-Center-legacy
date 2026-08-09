@@ -6,32 +6,80 @@
 import 'package:flutter/material.dart';
 
 import '../../core/insights_models.dart';
+import '../../core/scheduler_models.dart';
 import '../../core/theme/tokens.dart';
 import '../../ui/data.dart';
 import '../../ui/status.dart';
 import '../../ui/text.dart';
 
 class _CapRow {
-  const _CapRow({required this.label, required this.field, required this.days, required this.limit});
+  const _CapRow({required this.label, required this.field, required this.days, required this.limit, this.live});
   final String label;
   final String field;
   final List<BurndownDay> days;
   final int? limit;
+
+  /// The owning flow's live `today` map from the scheduler heartbeat
+  /// (`flows.state`, pushed every ~2s) — see the module doc comment below
+  /// for why this, not `days.last`, is what "today" should read from.
+  final Map<String, dynamic>? live;
 }
 
 class CapsTile extends StatelessWidget {
-  const CapsTile({super.key, required this.burndown});
+  const CapsTile({super.key, required this.burndown, this.liveFlows});
 
   final Burndown burndown;
+
+  /// `flowsControllerProvider`'s current snapshot, keyed by flow name — kept
+  /// current by WS `flows.state` broadcasts, unlike [burndown] itself (a
+  /// plain `FutureProvider`, fetched once per app session and never
+  /// invalidated automatically). Today's bar/count reads from here whenever
+  /// it's available; found live 2026-08-09 (D-pending): the Overview tile
+  /// could sit open all day showing e.g. "200/300" from whenever it first
+  /// loaded while a same-page live notification already said "reached 300",
+  /// an outright contradiction on one screen. History (the sparkline) is
+  /// still fine coming from [burndown] — past days never change once the
+  /// calendar day rolls over.
+  final Map<String, FlowState>? liveFlows;
 
   @override
   Widget build(BuildContext context) {
     final rows = [
-      _CapRow(label: 'Scan · profiles', field: 'profiles', days: burndown.scan, limit: burndown.limits['profiles']),
-      _CapRow(label: 'Scan · reels', field: 'reels', days: burndown.scan, limit: burndown.limits['reels']),
-      _CapRow(label: 'Scan · posts', field: 'posts', days: burndown.scan, limit: burndown.limits['posts']),
-      _CapRow(label: 'Scrape', field: 'scraped', days: burndown.scrape, limit: burndown.limits['scrape']),
-      _CapRow(label: 'Follow', field: 'followed', days: burndown.follow, limit: burndown.limits['follow']),
+      _CapRow(
+        label: 'Scan · profiles',
+        field: 'profiles',
+        days: burndown.scan,
+        limit: burndown.limits['profiles'],
+        live: liveFlows?['entity-scan']?.today,
+      ),
+      _CapRow(
+        label: 'Scan · reels',
+        field: 'reels',
+        days: burndown.scan,
+        limit: burndown.limits['reels'],
+        live: liveFlows?['entity-scan']?.today,
+      ),
+      _CapRow(
+        label: 'Scan · posts',
+        field: 'posts',
+        days: burndown.scan,
+        limit: burndown.limits['posts'],
+        live: liveFlows?['entity-scan']?.today,
+      ),
+      _CapRow(
+        label: 'Scrape',
+        field: 'scraped',
+        days: burndown.scrape,
+        limit: burndown.limits['scrape'],
+        live: liveFlows?['entity-scrape']?.today,
+      ),
+      _CapRow(
+        label: 'Follow',
+        field: 'followed',
+        days: burndown.follow,
+        limit: burndown.limits['follow'],
+        live: liveFlows?['entity-follow']?.today,
+      ),
     ];
 
     return Column(
@@ -51,7 +99,8 @@ class _CapBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokens = theme.tokens;
-    final today = row.days.isEmpty ? 0 : (row.days.last.values[row.field] ?? 0);
+    final liveToday = (row.live?[row.field] as num?)?.toInt();
+    final today = liveToday ?? (row.days.isEmpty ? 0 : (row.days.last.values[row.field] ?? 0));
     final limit = row.limit;
     final series = row.days.length <= 7 ? row.days : row.days.sublist(row.days.length - 7);
     final values = [for (final day in series) day.values[row.field] ?? 0];

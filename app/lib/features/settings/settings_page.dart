@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/app_snack_bar.dart';
 import '../../ui/feedback.dart';
 import '../../core/file_opener.dart';
+import '../../core/settings_nav.dart';
 import '../../ui/page.dart';
 import 'appearance_tab.dart';
 import 'config_controller.dart';
@@ -27,6 +28,11 @@ class SettingsPage extends ConsumerWidget {
     });
 
     final configAsync = ref.watch(configControllerProvider);
+    // `DefaultTabController` only ever builds its underlying `TabController`
+    // once per mount — a rebuild with a different `initialIndex` alone does
+    // nothing, so a palette-requested tab jump (V2.12) is keyed in via a
+    // fresh `Key`, forcing a real remount onto the requested tab.
+    final requestedTab = ref.watch(requestedSettingsTabProvider);
 
     return configAsync.stateView(
       describeError: (error) => 'Failed to load config: $error',
@@ -38,6 +44,8 @@ class SettingsPage extends ConsumerWidget {
         child: Focus(
           autofocus: true,
           child: DefaultTabController(
+            key: ValueKey(requestedTab),
+            initialIndex: requestedTab,
             length: 6,
             child: AppPage(
               title: 'Settings',

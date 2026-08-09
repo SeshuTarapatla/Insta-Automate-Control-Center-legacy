@@ -10,6 +10,7 @@ import '../core/theme/tokens.dart';
 import '../core/window_work_area.dart';
 import '../features/notifications/notification_center.dart';
 import '../features/services/dependencies_controller.dart';
+import '../ui/command/command_palette.dart';
 import '../ui/icons.dart';
 import '../ui/overlays.dart';
 import '../ui/status.dart';
@@ -44,14 +45,11 @@ class TitleBar extends ConsumerWidget {
             ),
           ),
           IconButton(
-            // The command palette itself is V2.12's scope (SCREENS.md §8) —
-            // this checkpoint only places the discoverable affordance
-            // (SCREENS.md §0), disabled rather than wired to a dead action.
-            tooltip: 'Command palette — coming soon',
+            tooltip: 'Command palette  (Ctrl+K)',
             iconSize: 18,
             visualDensity: VisualDensity.compact,
             icon: AppIcon(AppIcons.command, size: IconSize.sm),
-            onPressed: null,
+            onPressed: () => showCommandPalette(context),
           ),
           IconButton(
             tooltip: 'Keyboard shortcuts  (?)',

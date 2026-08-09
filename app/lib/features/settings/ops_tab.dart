@@ -1,4 +1,3 @@
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,7 +6,7 @@ import '../../core/agent_client.dart';
 import '../../core/agent_ws.dart';
 import '../../core/app_snack_bar.dart';
 import '../../ui/feedback.dart';
-import '../../core/ops_confirm.dart';
+import '../../core/ops_actions.dart';
 import '../../core/ops_models.dart';
 import '../../core/relative_time.dart';
 import '../../core/theme/tokens.dart';
@@ -36,23 +35,12 @@ class OpsTab extends ConsumerStatefulWidget {
 class _OpsTabState extends ConsumerState<OpsTab> {
   String? _selectedJobId;
 
+  /// `core/ops_actions.dart` owns the confirm-if-needed/start/error-snackbar
+  /// path (shared with the command palette, V2.12); this only adds picking
+  /// the freshly-started job in the local history view.
   Future<void> _run(OpsJobSpec spec) async {
-    if (spec.confirm) {
-      final confirmed = await confirmOpsAction(context, spec.label, spec.consequence ?? '');
-      if (!confirmed) return;
-    }
-    if (!mounted) return;
-    try {
-      final job = await ref.read(opsJobsControllerProvider.notifier).start(spec.id);
-      if (!mounted) return;
-      setState(() => _selectedJobId = job.id);
-    } on DioException catch (error) {
-      if (!mounted) return;
-      final message = error.response?.statusCode == 409
-          ? 'A job is already running — wait for it to finish first.'
-          : 'Failed to start ${spec.label}: ${describeAgentError(error)}';
-      if (context.mounted) AppSnackBar.show(context, message, isError: true);
-    }
+    final job = await runOpsJob(context, ref, spec);
+    if (job != null && mounted) setState(() => _selectedJobId = job.id);
   }
 
   @override

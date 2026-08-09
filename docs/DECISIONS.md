@@ -5,6 +5,148 @@ session can tell a settled question from an open one.
 
 ---
 
+## 2026-08-10 — V2.12 (Command palette) built, planned and completed in one session at your request (D119)
+
+### D119 · `Ctrl+K` wired to a real registry sourced from eight existing providers; three action paths deduplicated to feed it without a second implementation; Settings/Insights gain tab-jump, Limits gains a "jump to field" highlight
+
+**Scope.** [SCREENS.md](docs/v2/SCREENS.md) §8's own source table, built exactly as specified:
+`ui/command/` (registry, fuzzy matcher, palette UI, recents), every group wired to the provider
+that screen already reads, every action reusing an existing controller call/confirm dialog rather
+than a second implementation. `core/shortcuts_reference.dart` regenerated from a registry, per the
+plan's own line — see the honest scope note on that below.
+
+**New `app/lib/ui/command/`:**
+- `command_item.dart` — `CommandItem` (id/group/label/subtitle/badge/icon/keywords/onSelect) and
+  the fixed `commandGroupOrder` from SCREENS §8 (`Go to, Flows, Library, Services, Ops, Appearance,
+  Settings, Help`).
+- `command_matcher.dart` — case-insensitive fuzzy **subsequence** matching (every query character
+  must appear in order, not necessarily contiguous — "scr" matches "Trigger now: Scrape" per the
+  mockup's own example), scored so a prefix match always outranks a later subsequence match, groups
+  always sorted by `commandGroupOrder` regardless of match strength, and every tie broken by an
+  explicit original-index tiebreaker rather than trusting `List.sort` to be stable (it isn't
+  guaranteed to be) — caught before it could become a real flaky-order bug, not found live.
+- `command_registry.dart` — `buildCommandItems(context, ref)`, one function pulling all ~90+ live
+  items from `flowsControllerProvider`, `libraryFoldersControllerProvider` +
+  `libraryEntitiesControllerProvider`, `servicesControllerProvider`, `opsSpecsProvider`,
+  `themeControllerProvider`, `configControllerProvider`'s int-typed schema, plus the seven nav
+  destinations, six Settings tabs, three Insights tabs and two Help actions. Every `onSelect`
+  closure calls an existing function — `forceRunFlow`/`stopFlowRun`/`reduceReserveFlow`/
+  `toggleFlowSwitch`, `openReviewModeForFolder`, the new `service_actions.dart`/`ops_actions.dart`
+  (below), `showShortcutsReference`/`showWelcomeDialog` — never a parallel copy of what any of
+  those already do, including their confirm dialogs.
+- `command_recents.dart` — `RecentCommandsNotifier`, persisted via `shared_preferences` (same
+  synchronous-default-then-load shape as `LibraryZoomNotifier`/`ThemeController`), floats up to 8
+  recently-used commands to the top as a "Recent" pseudo-group when the query is empty, deduplicated
+  against the normal grouped list below it rather than shown twice.
+- `command_palette.dart` — `showCommandPalette(anchorContext)` + `CommandPalette`. Built as a
+  `showDialog` with a custom `Align`+`AppOverlay` body (not `AppDialog`, which is a fixed-width
+  centered `AlertDialog` — wrong shape for a top-anchored, tall, keyboard-driven list), `CallbackShortcuts`
+  for ArrowUp/ArrowDown/Escape/Enter over a plain `TextField` (matching this app's own
+  `search_field.dart` precedent for the same "shortcuts win, typed characters still reach the field"
+  shape), and — the one non-obvious wrinkle — every action closure is built against the **caller's**
+  stable context (`anchorContext`, the title bar's or `AppShell`'s own, passed down at
+  `showCommandPalette` call time), never the dialog route's own `context`, because activating a
+  command almost always changes what's on screen (a nav-index write) out from under the dialog
+  that's popping at the same moment.
+
+**Deduplication, not new confirms — three action paths shared with the palette, not copied for
+it (all pre-existing, all left behaving identically to before):**
+- `core/service_actions.dart` — `startService`/`stopService`/`restartService`/`takeoverService`/
+  `testService`, lifted out of `ServiceDetail`'s private `_start`/`_stop`/`_restart`/`_takeover`/
+  `_test` (same confirm dialogs, same `serviceStopConsequence` map, same error-snackbar shape).
+  `ServiceDetail` itself now calls these too — its own busy-spinner state is the only thing that
+  stayed local, since the palette has no per-button spinner to drive.
+- `core/ops_actions.dart` — `runOpsJob`, lifted out of `OpsTab._run` (confirm-if-`spec.confirm`,
+  start, fold a 409 into "a job is already running" same as before). `OpsTab._run` now just calls
+  it and keeps its own "select the freshly-started job in local history" behaviour.
+- `core/flow_switch_confirm.dart` gained `toggleFlowSwitch` (confirm-if-turning-off, apply, catch
+  `DioException` into a snackbar) — `flow_node.dart`'s private `_toggleSwitch` deleted in favour of
+  it, one call site instead of two.
+
+**Settings/Insights gain a tab-jump they had no way to receive from outside before.**
+`DefaultTabController` only ever builds its underlying `TabController` once per mount — a rebuild
+with a different `initialIndex` alone does nothing. New `core/settings_nav.dart`'s
+`requestedSettingsTabProvider`/`requestedInsightsTabProvider` (plain `Notifier<int>`) are read into
+`initialIndex` **and** used as the `DefaultTabController`'s own `Key`, forcing a real remount onto
+the requested tab when the palette (or anything else) writes a new value. `InsightsPage` moved from
+`StatelessWidget` to `ConsumerWidget` to read it; `SettingsPage` (already a `ConsumerWidget`) just
+gained the watch.
+
+**"Jump to its field" for a `Settings` config-key result is a real scroll-to-and-flash, not just a
+tab switch.** `limits_tab.dart` moved from `StatelessWidget` to `ConsumerStatefulWidget` to hold a
+`GlobalKey` per `LimitCard` (built lazily, cached across rebuilds) and call
+`Scrollable.ensureVisible` when `highlightedConfigKeyProvider` (new, `settings_nav.dart`, a
+generation-counted auto-clearing `Notifier<String?>` — the counter exists so an older highlight's
+delayed clear can never stomp a newer one fired before it expires) names a key. `LimitCard` gained a
+`highlighted` bool wired straight to `AppCard(selected: ...)` — the existing selected-state tint and
+accent ring, not a new visual language, snapping on then auto-clearing after ~2.2s.
+
+**`Ctrl+K` and the shortcuts reference — a single source, honestly scoped.** New
+`core/global_shortcuts.dart`'s `globalShortcuts` list (id + `SingleActivator` + display keys +
+description) is now what both `shell/app_shell.dart`'s `CallbackShortcuts` bindings map **and**
+`core/shortcuts_reference.dart`'s Global-scope rows are built from — a shortcut added to the list
+without a matching action in `app_shell.dart`'s `actionsById` map now fails loudly (a missing map
+key) instead of the two lists silently drifting apart the way this file's own pre-V2.12 comment had
+to warn future editors about by hand. `Ctrl+1..7` became seven individually-described rows ("Jump to
+Overview" … "Jump to Settings") rather than one collapsed "Ctrl+1..7" summary line, since the
+per-destination id was already needed for the action map — a genuine small improvement, not scope
+creep. **Deliberately not folded into the same mechanism, and said so in the file's own comment
+rather than forced into a shape that doesn't fit:** `Ctrl+Alt+I` is a real OS-level `hotkey_manager`
+registration (`shell/hotkey.dart`), not a Flutter `CallbackShortcuts` binding, and every
+Settings/Library key handler (`Ctrl+E`, `Ctrl+F`/`Esc`, the whole Library selection key map) is a
+page-scoped handler with no shared registry of its own to generate from — both stay hand-listed,
+same as before.
+
+**Verified:** `flutter analyze` clean. `flutter test` 224 total, 223 passing — the one
+`shell_layout_test.dart` "rail expanded" failure reconfirmed pre-existing and unrelated via
+`git stash` on the branch tip (same D114/D118 precedent), not touched by this session's changes.
+New `test/command_palette_test.dart` (10 checks): the matcher (subsequence survives non-contiguous
+letters, a fully-absent letter matches nothing, a prefix beats a later subsequence match in the same
+group, group order is fixed regardless of input/match order, an empty query preserves registry order
+via the explicit tiebreaker, `groupCommands` buckets and drops empty groups); the registry (every
+group populated from its real provider and gated exactly like its source screen — `entity-follow`-
+only "Reduce reserve" absent when only `entity-scrape` is faked, `Start`/`Test` absent for an
+already-running, no-test-capable fake service, real badges for folder counts and a config value);
+and the palette widget itself (typing narrows to one match and tapping it both closes the dialog and
+performs the exact same provider writes `curation_tile.dart`'s own "open in Library" helper makes,
+recording it into recents; `ArrowDown`/`ArrowDown`/`Enter` activates the third `Go to` item with no
+mouse touch at all; `Esc` dismisses without invoking anything). `flutter build windows --debug`
+succeeds. Three stale running instances killed, one fresh instance built and started for you per
+rule 5 — **your checkpoint test is what's still open**: `Ctrl+K` from every screen, search for a
+flow/folder/ops job/theme/config key, confirm a destructive action invoked from the palette still
+prompts, confirm `Esc` dismisses and focus returns where it was.
+
+### D120 · Same-session fix: ArrowDown/ArrowUp moved the highlight past the visible rows with nothing on screen following it
+
+**Found by your own checkpoint test, immediately.** Mouse-wheel scrolling worked; arrow-key
+navigation didn't visibly do anything once the highlighted row scrolled past the palette's fixed
+480px body — the highlight index was updating correctly (confirmed by the two keyboard-nav tests
+already passing), the list just never scrolled to keep it on screen.
+
+**Fixed** with the same `GlobalKey` + `Scrollable.ensureVisible` technique `limits_tab.dart`
+already uses for the palette's own "jump to a config field" highlight (D119): one `GlobalKey` per
+row, rebuilt fresh each frame and only ever read back from that same frame's own
+`addPostFrameCallback` — safe because arrow-key navigation only ever moves the highlight by one row
+at a time, so the newly-highlighted row is always adjacent to whatever was already visible, never a
+jump `ensureVisible` could fail to resolve against an unmounted target. The result list itself moved
+from `ListView` to a `SingleChildScrollView` + `Column` in the same change — a plain `ListView`
+virtualizes, meaning a row several screens away from the visible viewport has no mounted `Element`
+at all yet, so its `GlobalKey.currentContext` would still be `null` the first time `ensureVisible`
+needed it after a large jump (typing a query that changes which item holds focus, for instance).
+The registry here tops out around 150 items even fully realized, so the always-mounted tradeoff
+costs nothing meaningful.
+
+**Verified:** a new regression test in `command_palette_test.dart` (12 total in that file now) —
+confirmed to actually fail against the pre-fix code (temporarily disabled the `ensureVisible` call,
+re-ran just this test, watched it fail with the scroll offset stuck at 0 after 20 `ArrowDown`
+presses, then restored the fix and reconfirmed green) before trusting it as a real regression
+guard, not just a passing assertion. `flutter analyze` clean, `flutter test` 225 total / 224
+passing (same pre-existing, unrelated `shell_layout_test.dart` failure). `flutter build windows
+--debug` succeeds. Rebuilt and restarted for you. **You confirmed live afterward, including the
+arrow-key scroll fix — V2.12 accepted.**
+
+---
+
 ## 2026-08-10 — V2.11 (Services, Insights, Settings) built out of D107's planned sequence order, at your explicit request (D118)
 
 ### D118 · V2.11 built before V2.12; several of PLAN_V2.md's own premises were already stale; `AppTable` gets its first real call sites; one real overflow bug found by the extended test suite

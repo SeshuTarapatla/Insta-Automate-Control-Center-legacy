@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_snack_bar.dart';
+import '../../core/service_actions.dart';
 import '../../core/service_models.dart';
 import '../../core/theme/tokens.dart';
 import '../../ui/buttons.dart';
@@ -13,17 +14,6 @@ import '../../ui/text.dart';
 import 'service_status_kind.dart';
 import 'service_terminal.dart';
 import 'services_controller.dart';
-
-/// What actually stops working while a service is down. A confirmation without
-/// a consequence is not a confirmation — same rule as the flow switches.
-const _stopConsequence = {
-  'adb': 'Every phone interaction goes through the ADB server: scan, scrape and follow runs will '
-      'fail until it is back, and the pods lose the device too.',
-  'vl-server': 'Gender and privacy classification stops. entity_classify will fail on every image '
-      'it tries while the model is down.',
-  'wsl-bridge': 'The device mirror stops. The pipeline itself keeps running — this only affects '
-      'scrcpy.',
-};
 
 class ServiceDetail extends ConsumerStatefulWidget {
   const ServiceDetail({super.key, required this.status});
@@ -58,76 +48,23 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
     }
   }
 
-  Future<bool> _confirm(String title, String body, String action) async {
-    final answer = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(body),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: Text(action)),
-        ],
-      ),
-    );
-    return answer == true;
-  }
-
   ServicesController get _services => ref.read(servicesControllerProvider.notifier);
 
-  Future<void> _start() =>
-      _run('start', () => _services.start(widget.status.name), '${widget.status.label} started');
-
-  Future<void> _stop() async {
-    final status = widget.status;
-    final consequence =
-        _stopConsequence[status.name] ?? 'Anything that depends on it will fail until it is back.';
-    if (!await _confirm('Stop ${status.label}?', consequence, 'Stop')) return;
-    await _run('stop', () => _services.stop(status.name), '${status.label} stopped');
+  /// `core/service_actions.dart` owns the confirm dialog and the try/catch
+  /// (shared with the command palette, V2.12); this only adds the per-button
+  /// busy-spinner state, which is purely local UI and has no palette
+  /// equivalent to share.
+  Future<void> _wrap(String action, Future<void> Function() body) async {
+    setState(() => _busy = action);
+    await body();
+    if (mounted) setState(() => _busy = null);
   }
 
-  Future<void> _restart() =>
-      _run('restart', () => _services.restart(widget.status.name), '${widget.status.label} restarted');
-
-  Future<void> _takeover() async {
-    final status = widget.status;
-    if (!await _confirm(
-      'Take over ${status.label}?',
-      'The agent will kill ${status.external?.display ?? 'the external process'} '
-          '(pid ${status.external?.pid}) and start its own supervised copy on port ${status.port}. '
-          'Anything mid-flight through it will be interrupted.',
-      'Take over',
-    )) {
-      return;
-    }
-    await _run('takeover', () => _services.takeover(status.name), '${status.label} taken over');
-  }
-
-  Future<void> _test() async {
-    setState(() => _busy = 'test');
-    try {
-      final outcome = await _services.runTest(widget.status.name);
-      if (mounted) {
-        // A failing test is an answer, not an error — it is reported as plainly
-        // as a passing one, and its metrics stay on screen either way.
-        AppSnackBar.show(
-          context,
-          '${widget.status.label}: ${outcome.summary}',
-          isError: !outcome.ok,
-        );
-      }
-    } catch (error) {
-      if (mounted) {
-        AppSnackBar.show(
-          context,
-          '${widget.status.label}: ${describeAgentError(error)}',
-          isError: true,
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _busy = null);
-    }
-  }
+  Future<void> _start() => _wrap('start', () => startService(context, ref, widget.status));
+  Future<void> _stop() => _wrap('stop', () => stopService(context, ref, widget.status));
+  Future<void> _restart() => _wrap('restart', () => restartService(context, ref, widget.status));
+  Future<void> _takeover() => _wrap('takeover', () => takeoverService(context, ref, widget.status));
+  Future<void> _test() => _wrap('test', () => testService(context, ref, widget.status));
 
   Future<void> _setSelfHeal(bool value) => _run(
     'self_heal',

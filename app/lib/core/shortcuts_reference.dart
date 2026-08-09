@@ -1,14 +1,20 @@
 import 'package:flutter/material.dart';
 
+import 'global_shortcuts.dart';
 import 'theme/tokens.dart';
 
-/// Every keyboard binding in the app, assembled by hand from the real call
-/// sites (CP 7.3) — nothing declares these in one place today, so this is
-/// the closest thing to a registry rather than a read of one. Keep in step
-/// with `settings/config_file_bar.dart` (Ctrl+E), `settings/devices_tab.dart`
-/// (Ctrl+F/Esc), `library/library_grid.dart` (the rest), `shell/hotkey.dart`
-/// (Ctrl+Alt+I), `shell/app_shell.dart` (Ctrl+1..7/Ctrl+B, V2.5) and this
-/// file's own global `?` binding.
+/// Every keyboard binding in the app. Global-scope rows (V2.12) are
+/// generated from `global_shortcuts.dart` — the same list `shell/
+/// app_shell.dart`'s `CallbackShortcuts` wires up — so those specifically
+/// can no longer drift the way this file's pre-V2.12 comment had to warn
+/// about by hand. What's left hand-listed below is physically elsewhere and
+/// honestly can't be generated the same way: `Ctrl+Alt+I` is a real OS-level
+/// `hotkey_manager` registration (`shell/hotkey.dart`), not a
+/// `CallbackShortcuts` binding, and every Settings/Library row is a
+/// page-scoped key handler with no shared registry of its own. Keep those in
+/// step with `settings/config_file_bar.dart` (Ctrl+E),
+/// `settings/devices_tab.dart` (Ctrl+F/Esc) and `library/library_grid.dart`
+/// (the rest).
 class ShortcutEntry {
   const ShortcutEntry({required this.keys, required this.description, required this.scope});
 
@@ -17,23 +23,21 @@ class ShortcutEntry {
   final String scope;
 }
 
-const shortcutReference = [
-  ShortcutEntry(keys: 'Ctrl+Alt+I', description: 'Show or hide the window', scope: 'Global'),
-  ShortcutEntry(keys: '?', description: 'Open this shortcut list', scope: 'Global'),
-  ShortcutEntry(keys: 'Ctrl+1..7', description: 'Jump to a nav rail destination', scope: 'Global'),
-  ShortcutEntry(keys: 'Ctrl+B', description: 'Collapse or expand the nav rail', scope: 'Global'),
-  ShortcutEntry(keys: 'Ctrl+E', description: 'Open config.env for editing', scope: 'Settings'),
-  ShortcutEntry(keys: 'Ctrl+F', description: 'Search paired devices', scope: 'Settings › Devices'),
-  ShortcutEntry(keys: 'Esc', description: 'Close device search', scope: 'Settings › Devices'),
-  ShortcutEntry(keys: 'Click / Space', description: 'Toggle the focused image', scope: 'Library'),
-  ShortcutEntry(keys: 'Arrow keys', description: 'Move focus by one image or row', scope: 'Library'),
-  ShortcutEntry(
+final shortcutReference = [
+  const ShortcutEntry(keys: 'Ctrl+Alt+I', description: 'Show or hide the window', scope: 'Global'),
+  for (final s in globalShortcuts) ShortcutEntry(keys: s.keys, description: s.description, scope: 'Global'),
+  const ShortcutEntry(keys: 'Ctrl+E', description: 'Open config.env for editing', scope: 'Settings'),
+  const ShortcutEntry(keys: 'Ctrl+F', description: 'Search paired devices', scope: 'Settings › Devices'),
+  const ShortcutEntry(keys: 'Esc', description: 'Close device search', scope: 'Settings › Devices'),
+  const ShortcutEntry(keys: 'Click / Space', description: 'Toggle the focused image', scope: 'Library'),
+  const ShortcutEntry(keys: 'Arrow keys', description: 'Move focus by one image or row', scope: 'Library'),
+  const ShortcutEntry(
     keys: 'Shift + click / arrow',
     description: 'Extend the selection to here',
     scope: 'Library',
   ),
-  ShortcutEntry(keys: 'Ctrl+A', description: 'Select every image in this folder', scope: 'Library'),
-  ShortcutEntry(keys: 'Delete', description: 'Delete the current selection', scope: 'Library'),
+  const ShortcutEntry(keys: 'Ctrl+A', description: 'Select every image in this folder', scope: 'Library'),
+  const ShortcutEntry(keys: 'Delete', description: 'Delete the current selection', scope: 'Library'),
 ];
 
 Future<void> showShortcutsReference(BuildContext context) {

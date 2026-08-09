@@ -47,6 +47,9 @@ class AppIcons {
   static PhosphorIconData pair(PhosphorIconsStyle w) => PhosphorIcons.qrCode(w);
   static PhosphorIconData command(PhosphorIconsStyle w) => PhosphorIcons.command(w);
   static PhosphorIconData sidebarCollapse(PhosphorIconsStyle w) => PhosphorIcons.sidebarSimple(w);
+  static PhosphorIconData appearance(PhosphorIconsStyle w) => PhosphorIcons.palette(w);
+  static PhosphorIconData power(PhosphorIconsStyle w) => PhosphorIcons.power(w);
+  static PhosphorIconData goTo(PhosphorIconsStyle w) => PhosphorIcons.arrowRight(w);
 
   /// The human-review waypoint marker (Flows' two ⚑ edges, V2.6; Library's
   /// folder-rail review markers, V2.9) — one glyph for "the pipeline is

@@ -1,11 +1,9 @@
 // SCREENS.md §2 / V2.6 — one pipeline node: a horizontal strip carrying
 // status, name, state, inline gate reason, today's counters and actions all
 // in one row, replacing the old five-disconnected-cards `Wrap` (AUDIT §13).
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/app_snack_bar.dart';
 import '../../core/file_opener.dart';
 import '../../core/flow_switch_confirm.dart';
 import '../../core/force_run.dart';
@@ -21,7 +19,6 @@ import '../../ui/status.dart';
 import '../../ui/surfaces.dart';
 import '../../ui/text.dart';
 import '../live/live_controller.dart';
-import '../settings/config_controller.dart';
 import 'flow_status.dart';
 import 'flows_controller.dart';
 
@@ -44,16 +41,6 @@ class FlowNode extends ConsumerWidget {
   const FlowNode({super.key, required this.state});
 
   final FlowState state;
-
-  Future<void> _toggleSwitch(BuildContext context, WidgetRef ref, bool value) async {
-    final key = flowSwitchKey(state.flow);
-    if (!await confirmFlowSwitch(context, key, value)) return;
-    try {
-      await ref.read(configControllerProvider.notifier).applySwitch(key, value);
-    } on DioException {
-      if (context.mounted) AppSnackBar.show(context, 'Could not update $key', isError: true);
-    }
-  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -117,7 +104,10 @@ class FlowNode extends ConsumerWidget {
                     ),
                   ),
                   SizedBox(width: tokens.space.sm),
-                  Switch(value: state.switchOn, onChanged: (value) => _toggleSwitch(context, ref, value)),
+                  Switch(
+                    value: state.switchOn,
+                    onChanged: (value) => toggleFlowSwitch(context, ref, state.flow, value),
+                  ),
                   SizedBox(width: tokens.space.xs),
                   // The same info tint as the accent edge and the label
                   // above, never the warn amber — standing by on a false

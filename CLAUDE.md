@@ -224,9 +224,53 @@
 > analyze` clean, `flutter test` 214 total / 213 passing (the one `shell_layout_test.dart`
 > failure reconfirmed pre-existing and unrelated via `git stash` on the branch tip). `flutter
 > build windows --debug` succeeds. Built and started for you per rule 5. Full account in
-> DECISIONS.md's D118. **You confirmed the checkpoint test live — V2.11 accepted.** **Next up:
-> V2.12 (Command palette)** — see PLAN_V2.md's `## V2.12 — Command palette` section; `Ctrl+K`
-> doesn't exist at all today.
+> DECISIONS.md's D118. **You confirmed the checkpoint test live — V2.11 accepted.**
+>
+> **V2.12 (Command palette) built and awaiting your checkpoint test, 2026-08-10.** `Ctrl+K` from
+> anywhere opens a real registry — `ui/command/` — sourced from eight existing providers (flows,
+> library folders/entities, services, ops specs, theme, config schema, nav destinations, help),
+> fuzzy subsequence matching (SCREENS.md §8's own "scr" → "Trigger now: Scrape" example), grouped
+> and ordered per SCREENS.md §8's fixed group list, recents floated to the top. Every action reuses
+> an existing controller call and confirm dialog — nothing in the palette is a second
+> implementation of behavior that already exists elsewhere. Three action paths were deduplicated to
+> make that true rather than just claimed: `core/service_actions.dart`
+> (start/stop/restart/takeover/test, lifted out of `ServiceDetail`'s own private methods, which now
+> call these too), `core/ops_actions.dart` (`runOpsJob`, lifted out of `OpsTab._run`), and
+> `flow_switch_confirm.dart`'s new `toggleFlowSwitch` (replacing `flow_node.dart`'s private
+> duplicate). Settings and Insights gained a real tab-jump (`core/settings_nav.dart`'s
+> `requestedSettingsTabProvider`/`requestedInsightsTabProvider`, forcing a `DefaultTabController`
+> remount via a keyed rebuild — the only way to change its `initialIndex` after first mount), and a
+> Settings config-key result does a real scroll-to-and-flash on the matching `LimitCard`
+> (`highlightedConfigKeyProvider`, `Scrollable.ensureVisible` + the existing `AppCard(selected:)`
+> accent ring). `core/shortcuts_reference.dart` is now genuinely generated from a single source
+> (`core/global_shortcuts.dart`) shared with `app_shell.dart`'s own `CallbackShortcuts` map for
+> every binding that actually lives in one place (`Ctrl+K`/`?`/`Ctrl+1..7`/`Ctrl+B`) — `Ctrl+Alt+I`
+> (a real OS hotkey registration) and the Settings/Library page-scoped key handlers honestly stay
+> hand-listed, since there's no shared registry for those to generate from. Full account in
+> DECISIONS.md's D119.
+>
+> **Same-session fix, D120: your checkpoint test immediately caught arrow-key navigation not
+> visibly doing anything once the highlight scrolled past the palette's fixed body** — the
+> highlight index was updating correctly, the list just never scrolled to follow it (mouse-wheel
+> scrolling worked fine, which is what made it look like only arrow keys were broken). Fixed with
+> the same `GlobalKey` + `Scrollable.ensureVisible` technique the config-field highlight already
+> uses, plus switching the result list from a virtualizing `ListView` to an always-realized
+> `SingleChildScrollView`/`Column` (the registry tops out around 150 items, so nothing meaningful is
+> lost) so `ensureVisible` never targets a row with no mounted `Element` yet. A new regression test
+> was confirmed to actually fail against the pre-fix code before being trusted, not just written and
+> left green. `flutter analyze` clean, `flutter test` 225 total / 224 passing (same pre-existing,
+> unrelated `shell_layout_test.dart` failure), 12 checks total in `test/command_palette_test.dart`.
+> `flutter build windows --debug` succeeds. Rebuilt and restarted for you. **You confirmed the
+> checkpoint test live, including the arrow-key scroll fix — V2.12 accepted.**
+>
+> **Next up: V2.13 (Motion, accessibility, release)** — see PLAN_V2.md's `## V2.13 — Motion,
+> accessibility, release` section. The last checkpoint in the plan: a motion audit against
+> `motion.reduced`, the accessibility floor (tooltips/semantics on every icon-only button, focus
+> order, dialog focus trapping), a `MouseCursor` sweep, a performance check (the library grid at
+> 7,655 thumbnails, the log console at a few thousand lines, Mica compositing while a terminal
+> streams), `docs/ARCHITECTURE.md` §9 updated to describe what v2 actually built, and finally
+> `pubspec.yaml` → `2.0.0+1` with the `v2.0.0` tag. New session recommended (PLAN_V2's own
+> "one checkpoint per session" guidance).
 >
 > **Scope boundary: v2 is entirely inside `app/`.** No agent, pipeline, helm or mobile
 > changes; no redeploys; no cross-repo branches. Every piece of data the redesign needs is

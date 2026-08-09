@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../ui/feedback.dart';
 import '../../core/insights_models.dart';
 import '../../core/nav_state.dart';
+import '../../core/settings_nav.dart';
 import '../../core/theme/tokens.dart';
 import '../../ui/data.dart';
 import '../../ui/icons.dart';
@@ -37,12 +38,18 @@ void _openLibraryFolder(WidgetRef ref, String folder) {
 /// yielding, and whether the daily caps are being hit. Classify-accuracy
 /// sampling was scoped out of this checkpoint (no persisted verdict history
 /// exists to sample from — see DECISIONS.md).
-class InsightsPage extends StatelessWidget {
+class InsightsPage extends ConsumerWidget {
   const InsightsPage({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Same `Key`-forces-a-remount trick `settings_page.dart` uses for a
+    // palette-requested tab jump (V2.12) — `DefaultTabController` only ever
+    // reads `initialIndex` once per mount.
+    final requestedTab = ref.watch(requestedInsightsTabProvider);
     return DefaultTabController(
+      key: ValueKey(requestedTab),
+      initialIndex: requestedTab,
       length: 3,
       child: AppPage(
         title: 'Insights',

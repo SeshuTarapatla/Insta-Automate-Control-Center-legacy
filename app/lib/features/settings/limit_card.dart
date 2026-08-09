@@ -13,10 +13,14 @@ import 'config_controller.dart';
 /// while the field diverges from the last-committed value, and an Undo
 /// action on the confirmation snackbar.
 class LimitCard extends ConsumerStatefulWidget {
-  const LimitCard({super.key, required this.schema, required this.committedValue});
+  const LimitCard({super.key, required this.schema, required this.committedValue, this.highlighted = false});
 
   final ConfigKeySchema schema;
   final int committedValue;
+
+  /// V2.12 — briefly true right after the command palette's "jump to its
+  /// field" result lands here (`highlightedConfigKeyProvider`).
+  final bool highlighted;
 
   @override
   ConsumerState<LimitCard> createState() => _LimitCardState();
@@ -119,6 +123,7 @@ class _LimitCardState extends ConsumerState<LimitCard> {
     return SizedBox(
       width: 340,
       child: AppCard(
+        selected: widget.highlighted,
         child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [

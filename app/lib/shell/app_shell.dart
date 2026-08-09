@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/global_shortcuts.dart';
 import '../core/nav_state.dart';
 import '../core/onboarding.dart';
 import '../core/shortcuts_reference.dart';
@@ -13,6 +13,7 @@ import '../features/live/live_page.dart';
 import '../features/overview/overview_page.dart';
 import '../features/services/services_page.dart';
 import '../features/settings/settings_page.dart';
+import '../ui/command/command_palette.dart';
 import '../ui/motion.dart';
 import 'connection_banner.dart';
 import 'nav_rail.dart';
@@ -52,31 +53,31 @@ class _AppShellState extends ConsumerState<AppShell> {
     final selected = ref.watch(selectedNavIndexProvider);
     ref.watch(onboardingControllerProvider).whenData(_maybeShowOnboarding);
 
+    // Every binding's activator/keys/description lives once in
+    // `core/global_shortcuts.dart` (V2.12) — this map supplies only the
+    // action per id, so a shortcut added there without a matching action
+    // here fails loudly (a missing map key) instead of silently drifting
+    // the way two independently hand-maintained lists could.
+    final actionsById = <GlobalShortcutId, VoidCallback>{
+      GlobalShortcutId.commandPalette: () => showCommandPalette(context),
+      GlobalShortcutId.shortcutsReference: () => showShortcutsReference(context),
+      GlobalShortcutId.navOverview: () => ref.read(selectedNavIndexProvider.notifier).select(overviewIndex),
+      GlobalShortcutId.navFlows: () => ref.read(selectedNavIndexProvider.notifier).select(flowsIndex),
+      GlobalShortcutId.navLive: () => ref.read(selectedNavIndexProvider.notifier).select(liveIndex),
+      GlobalShortcutId.navServices: () => ref.read(selectedNavIndexProvider.notifier).select(servicesIndex),
+      GlobalShortcutId.navLibrary: () => ref.read(selectedNavIndexProvider.notifier).select(libraryIndex),
+      GlobalShortcutId.navInsights: () => ref.read(selectedNavIndexProvider.notifier).select(insightsIndex),
+      GlobalShortcutId.navSettings: () => ref.read(selectedNavIndexProvider.notifier).select(settingsIndex),
+      GlobalShortcutId.toggleNavRail: () => ref.read(navRailCollapsedProvider.notifier).toggle(),
+    };
+
     return CallbackShortcuts(
-      // The first app-wide binding (everything else is page-scoped) — still
-      // reaches here from a focused text field the same way Ctrl+E does
+      // The first app-wide bindings (everything else is page-scoped) — still
+      // reach here from a focused text field the same way Ctrl+E does
       // (settings_page.dart's own comment on that), since shortcuts
       // propagate up the focus chain rather than being captured only at
       // the focused leaf.
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.slash, shift: true): () => showShortcutsReference(context),
-        const SingleActivator(LogicalKeyboardKey.digit1, control: true): () =>
-            ref.read(selectedNavIndexProvider.notifier).select(overviewIndex),
-        const SingleActivator(LogicalKeyboardKey.digit2, control: true): () =>
-            ref.read(selectedNavIndexProvider.notifier).select(flowsIndex),
-        const SingleActivator(LogicalKeyboardKey.digit3, control: true): () =>
-            ref.read(selectedNavIndexProvider.notifier).select(liveIndex),
-        const SingleActivator(LogicalKeyboardKey.digit4, control: true): () =>
-            ref.read(selectedNavIndexProvider.notifier).select(servicesIndex),
-        const SingleActivator(LogicalKeyboardKey.digit5, control: true): () =>
-            ref.read(selectedNavIndexProvider.notifier).select(libraryIndex),
-        const SingleActivator(LogicalKeyboardKey.digit6, control: true): () =>
-            ref.read(selectedNavIndexProvider.notifier).select(insightsIndex),
-        const SingleActivator(LogicalKeyboardKey.digit7, control: true): () =>
-            ref.read(selectedNavIndexProvider.notifier).select(settingsIndex),
-        const SingleActivator(LogicalKeyboardKey.keyB, control: true): () =>
-            ref.read(navRailCollapsedProvider.notifier).toggle(),
-      },
+      bindings: {for (final s in globalShortcuts) s.activator: actionsById[s.id]!},
       child: Focus(
         autofocus: true,
         child: Scaffold(

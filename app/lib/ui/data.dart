@@ -41,7 +41,16 @@ class AppTableColumn<T> {
 /// tab, the paired-devices list, the ops job history, and the dependencies
 /// tab — all rendered four different ways today.
 class AppTable<T> extends StatelessWidget {
-  const AppTable({super.key, required this.columns, required this.rows, this.onRowTap, this.sort, this.onSort, this.emptyState});
+  const AppTable({
+    super.key,
+    required this.columns,
+    required this.rows,
+    this.onRowTap,
+    this.sort,
+    this.onSort,
+    this.emptyState,
+    this.isSelected,
+  });
 
   final List<AppTableColumn<T>> columns;
   final List<T> rows;
@@ -49,6 +58,11 @@ class AppTable<T> extends StatelessWidget {
   final AppTableSort? sort;
   final ValueChanged<AppTableSort>? onSort;
   final Widget? emptyState;
+
+  /// Tints a row the same way a selected list tile would — Ops' job history
+  /// needs this to show which job's log is currently open in the panel next
+  /// to it (its first real call site).
+  final bool Function(T)? isSelected;
 
   Widget _wrap(AppTableColumn<T> column, Widget child) {
     final aligned = Align(alignment: column.numeric ? Alignment.centerRight : Alignment.centerLeft, child: child);
@@ -90,9 +104,13 @@ class AppTable<T> extends StatelessWidget {
     );
 
     Widget dataRow(T row) {
+      final selected = isSelected?.call(row) == true;
       final content = Container(
         padding: EdgeInsets.symmetric(vertical: tokens.space.sm, horizontal: tokens.space.md),
-        decoration: BoxDecoration(border: Border(bottom: BorderSide(color: tokens.surface.borderSubtle))),
+        decoration: BoxDecoration(
+          color: selected ? theme.colorScheme.primaryContainer.withValues(alpha: 0.4) : null,
+          border: Border(bottom: BorderSide(color: tokens.surface.borderSubtle)),
+        ),
         child: Row(children: [for (final column in columns) _wrap(column, column.cell(row))]),
       );
       return onRowTap == null ? content : InkWell(onTap: () => onRowTap!(row), child: content);

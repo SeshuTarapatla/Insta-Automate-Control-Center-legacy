@@ -176,8 +176,7 @@
 > attention" surface. **One more same-session follow-up, your own request: YOUR REVIEW reordered
 > to `gender_invalid` → `gender_valid` → `scraped`** (was `gender_valid` first). Full account,
 > including all four follow-ups, in DECISIONS.md's D115. **You confirmed the full checkpoint test
-> live 2026-08-08 — V2.10 accepted.** **Next up: V2.12 (Command palette)** — see PLAN_V2.md's
-> `## V2.12 — Command palette` section; `Ctrl+K` doesn't exist at all today.
+> live 2026-08-08 — V2.10 accepted.**
 >
 > **2026-08-09, same branch, a live-found bug fix, not v2 work (D116).** You caught the Overview
 > page's "Today's caps" tile showing Scrape at 200/300 for 2026-08-08 while the same page's live
@@ -194,6 +193,40 @@
 > pipeline for a few days)** — see D116 for what that means for checkpoint-testing this live, and
 > flag anything you need from the pipeline/device side in the meantime so it can be planned around
 > together rather than assumed.
+>
+> **2026-08-10, your own call: V2.11 (Services/Insights/Settings) built before V2.12,
+> out of D107's planned order.** Nothing in V2.5–V2.12 depends on anything else in that range
+> (PLAN_V2.md's own sequencing notes already say so), so the swap is safe — V2.12 (Command
+> palette) is simply next once V2.11 is confirmed. Services: `ResizableSplit` for both the
+> list↔detail split and (new) `ServiceDetail`'s panels↔terminal split; `ServiceTile` gained
+> `accentEdge`; the terminal frame gained a **Clear** button and a persisted **font-size**
+> control (`TerminalFontSizeNotifier`, same shape as `LibraryZoomNotifier`) — genuinely new
+> pieces, since neither this terminal nor `LogConsole` had either before; every header/search
+> icon migrated to `IconAction`, which had to be widened from a raw `IconData` to the same
+> `PhosphorIconData Function(PhosphorIconsStyle)` shape `AppIcon` uses, since its first real
+> call site couldn't take any of this app's own icons otherwise. Dependencies' ten bespoke rows
+> became one flat, sortable `AppTable` (worst-state-first default) instead of the four
+> group-partitioned sections SCREENS.md pictured — your own read available if you'd rather keep
+> the groups. Insights: `AppPage.maxContentWidth` now applies to all three tabs; Ranking is a
+> real `AppTable` (first proof the D77 flexible-column invariant holds outside its own test);
+> the funnel retokened and gained a real stage-by-stage draw-in animation; `BurndownTab` reuses
+> Overview's own `CapsTile` for a "today vs cap" strip; `Scanned`/`Female`/`Scraped` funnel
+> stages jump to their matching Library folder, `Private`/`Followed` stay plain (no real folder
+> to land on, D81's same reasoning). Settings: `SectionHeader` in Limits/Devices;
+> `switches_tab.dart`'s optional `AppSwitch` migration was evaluated and **not done** — it would
+> have silently dropped the per-flow dialog title. **Several of PLAN_V2.md's own premises were
+> already stale** (service_detail's claimed hardcoded hex, the terminal's claimed hardcoded
+> `'Consolas'`, devices_tab's claimed `Colors.white` quiet-zone — all already fixed by earlier
+> checkpoints) and skipped rather than redone. **One real overflow bug found by the extended
+> test suite, not by writing the code**: Ops' job history `AppTable` (Status/Job/Started/
+> Elapsed) overflowed the History sidebar's real ~250px width the instant it was written — fixed
+> by combining Started/Elapsed into one narrow two-line cell instead of dropping either. `flutter
+> analyze` clean, `flutter test` 214 total / 213 passing (the one `shell_layout_test.dart`
+> failure reconfirmed pre-existing and unrelated via `git stash` on the branch tip). `flutter
+> build windows --debug` succeeds. Built and started for you per rule 5. Full account in
+> DECISIONS.md's D118. **You confirmed the checkpoint test live — V2.11 accepted.** **Next up:
+> V2.12 (Command palette)** — see PLAN_V2.md's `## V2.12 — Command palette` section; `Ctrl+K`
+> doesn't exist at all today.
 >
 > **Scope boundary: v2 is entirely inside `app/`.** No agent, pipeline, helm or mobile
 > changes; no redeploys; no cross-repo branches. Every piece of data the redesign needs is

@@ -116,6 +116,10 @@ void main() {
           agentClientProvider.overrideWithValue(Dio()..httpClientAdapter = _OfflineAdapter()),
           opsSpecsProvider.overrideWith((ref) async => specs),
           opsJobsControllerProvider.overrideWith(() => _FakeOpsJobsController(jobs)),
+          // A running job's elapsed timer ticks once/sec forever — left real,
+          // `pumpAndSettle()` below would never see it settle (same reasoning
+          // `services_layout_test.dart` already applies to `uptimeTickProvider`).
+          opsTickProvider.overrideWith((ref) => const Stream<int>.empty()),
         ],
         child: MaterialApp(
           theme: ThemeData(useMaterial3: true, brightness: Brightness.dark),
@@ -131,6 +135,40 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.text('db_restore'), findsOneWidget);
+  });
+
+  testWidgets('a finished job\'s elapsed cell shows its fixed real duration, not a live clock', (tester) async {
+    final job = _job('succeeded-1', OpsJobStatus.succeeded, startedAt: DateTime(2026, 8, 2, 12, 0));
+
+    tester.view.physicalSize = const Size(1024, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          agentWsProvider.overrideWith(() => _FakeAgentWs()),
+          agentClientProvider.overrideWithValue(Dio()..httpClientAdapter = _OfflineAdapter()),
+          opsSpecsProvider.overrideWith((ref) async => [_spec('build')]),
+          opsJobsControllerProvider.overrideWith(() => _FakeOpsJobsController([job])),
+        ],
+        child: MaterialApp(
+          theme: ThemeData(useMaterial3: true, brightness: Brightness.dark),
+          home: const Scaffold(body: OpsTab()),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // endedAt - startedAt is fixed (60s, per `_job`'s own default), so the
+    // cell must show exactly that on the very first frame and never move —
+    // no `opsTickProvider` override needed since a finished job never
+    // watches it.
+    expect(find.text('1:00'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 2));
+    expect(find.text('1:00'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('OpsTab: no jobs run yet and nothing selected shows the empty explanations', (tester) async {

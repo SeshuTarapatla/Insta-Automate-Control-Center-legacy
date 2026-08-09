@@ -82,6 +82,28 @@ void main() {
       expect(tapped?.name, 'b');
     });
 
+    testWidgets('isSelected tints only the matching row', (tester) async {
+      final rows = [const _Row('a', 1), const _Row('b', 2)];
+      await pumpUi(
+        tester,
+        AppTable<_Row>(
+          rows: rows,
+          isSelected: (r) => r.name == 'b',
+          columns: [AppTableColumn<_Row>(label: 'Name', cell: (r) => Text(r.name))],
+        ),
+      );
+
+      Color? colorOf(String text) {
+        final decoration = tester
+            .widget<Container>(find.ancestor(of: find.text(text), matching: find.byType(Container)).first)
+            .decoration;
+        return (decoration as BoxDecoration?)?.color;
+      }
+
+      expect(colorOf('a'), isNull);
+      expect(colorOf('b'), isNotNull);
+    });
+
     testWidgets('emptyState renders instead of a zero-row table', (tester) async {
       await pumpUi(
         tester,

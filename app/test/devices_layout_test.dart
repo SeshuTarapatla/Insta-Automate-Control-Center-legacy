@@ -47,6 +47,8 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 100));
 
+    expect(find.text('Pair a phone'), findsOneWidget);
+    expect(find.text('Paired devices'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

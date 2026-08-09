@@ -10,6 +10,7 @@ import '../../core/agent_ws.dart';
 import '../../core/app_snack_bar.dart';
 import '../../core/service_models.dart';
 import '../../core/theme/tokens.dart';
+import '../../ui/buttons.dart';
 import '../../ui/feedback.dart';
 import '../../ui/icons.dart';
 import '../../ui/text.dart';
@@ -256,6 +257,11 @@ class _ServiceTerminalState extends ConsumerState<ServiceTerminal> {
     if (mounted) AppSnackBar.show(context, 'Terminal contents copied');
   }
 
+  /// A local-only visual clear — the next replay/reconnect repopulates from
+  /// the agent's ring as normal, same as a shell's own `clear` not touching
+  /// scrollback history.
+  void _clear() => setState(_terminal.eraseDisplay);
+
   // ------------------------------------------------------------------ view
 
   @override
@@ -297,6 +303,8 @@ class _ServiceTerminalState extends ConsumerState<ServiceTerminal> {
     final scheme = theme.colorScheme;
     final tokens = theme.tokens;
     final live = widget.status.terminalAvailable;
+    final fontSize = ref.watch(terminalFontSizeProvider);
+    final fontSizeNotifier = ref.read(terminalFontSizeProvider.notifier);
 
     return Container(
       height: tokens.space.rowHeight,
@@ -322,19 +330,35 @@ class _ServiceTerminalState extends ConsumerState<ServiceTerminal> {
             NumericText('$_cols×$_rows', role: TextRole.caption, color: tokens.content.secondary.withValues(alpha: 0.7)),
           ],
           const Spacer(),
-          IconButton(
-            iconSize: tokens.space.iconSm,
-            visualDensity: VisualDensity.compact,
+          IconAction(
+            icon: AppIcons.remove,
+            size: ButtonSize.sm,
+            tooltip: 'Smaller text',
+            onPressed: fontSize == terminalFontSizes.first ? null : fontSizeNotifier.decrease,
+          ),
+          IconAction(
+            icon: AppIcons.add,
+            size: ButtonSize.sm,
+            tooltip: 'Larger text',
+            onPressed: fontSize == terminalFontSizes.last ? null : fontSizeNotifier.increase,
+          ),
+          IconAction(
+            icon: AppIcons.search,
+            size: ButtonSize.sm,
             tooltip: 'Find  (Ctrl+F)',
             onPressed: _showsTerminal ? () => _toggleSearch() : null,
-            icon: AppIcon(AppIcons.search, size: IconSize.sm),
           ),
-          IconButton(
-            iconSize: tokens.space.iconSm,
-            visualDensity: VisualDensity.compact,
+          IconAction(
+            icon: AppIcons.clear,
+            size: ButtonSize.sm,
+            tooltip: 'Clear screen',
+            onPressed: _showsTerminal ? _clear : null,
+          ),
+          IconAction(
+            icon: AppIcons.copy,
+            size: ButtonSize.sm,
             tooltip: 'Copy everything',
             onPressed: _showsTerminal ? _copyAll : null,
-            icon: AppIcon(AppIcons.copy, size: IconSize.sm),
           ),
         ],
       ),
@@ -372,26 +396,23 @@ class _ServiceTerminalState extends ConsumerState<ServiceTerminal> {
             ),
           ),
           NumericText(hits, role: TextRole.caption, color: tokens.content.secondary),
-          IconButton(
-            iconSize: tokens.space.iconSm,
-            visualDensity: VisualDensity.compact,
+          IconAction(
+            icon: AppIcons.chevronUp,
+            size: ButtonSize.sm,
             tooltip: 'Previous',
             onPressed: _matches.isEmpty ? null : () => _step(-1),
-            icon: AppIcon(AppIcons.chevronUp, size: IconSize.sm),
           ),
-          IconButton(
-            iconSize: tokens.space.iconSm,
-            visualDensity: VisualDensity.compact,
+          IconAction(
+            icon: AppIcons.chevronDown,
+            size: ButtonSize.sm,
             tooltip: 'Next  (Enter)',
             onPressed: _matches.isEmpty ? null : () => _step(1),
-            icon: AppIcon(AppIcons.chevronDown, size: IconSize.sm),
           ),
-          IconButton(
-            iconSize: tokens.space.iconSm,
-            visualDensity: VisualDensity.compact,
+          IconAction(
+            icon: AppIcons.close,
+            size: ButtonSize.sm,
             tooltip: 'Close  (Esc)',
             onPressed: () => _toggleSearch(open: false),
-            icon: AppIcon(AppIcons.close, size: IconSize.sm),
           ),
         ],
       ),
@@ -455,7 +476,7 @@ class _ServiceTerminalState extends ConsumerState<ServiceTerminal> {
         controller: _controller,
         scrollController: _scroll,
         theme: _terminalTheme(theme),
-        textStyle: TerminalStyle(fontSize: 13, fontFamily: theme.tokens.typography.mono),
+        textStyle: TerminalStyle(fontSize: ref.watch(terminalFontSizeProvider), fontFamily: theme.tokens.typography.mono),
         padding: EdgeInsets.symmetric(horizontal: theme.tokens.space.md, vertical: theme.tokens.space.sm),
         // Nothing here is interactive: these panes replace terminal tabs the
         // user only ever read, and the agent exposes no write path to the pty.

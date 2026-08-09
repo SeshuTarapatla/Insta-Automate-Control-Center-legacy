@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ia_control_center/ui/buttons.dart';
+import 'package:ia_control_center/ui/icons.dart';
 
 import 'test_harness.dart';
 
@@ -42,7 +43,7 @@ void main() {
 
   testWidgets('IconAction requires and exposes its tooltip as a Semantics label', (tester) async {
     var pressed = false;
-    await pumpUi(tester, IconAction(icon: Icons.delete, tooltip: 'Delete', onPressed: () => pressed = true));
+    await pumpUi(tester, IconAction(icon: AppIcons.discard, tooltip: 'Delete', onPressed: () => pressed = true));
     expect(find.bySemanticsLabel('Delete'), findsOneWidget);
     await tester.tap(find.byType(IconButton));
     expect(pressed, isTrue);

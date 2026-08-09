@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/agent_client.dart';
 import '../../core/agent_ws.dart';
@@ -124,6 +125,47 @@ final servicesControllerProvider = AsyncNotifierProvider<ServicesController, Lis
 final uptimeTickProvider = StreamProvider.autoDispose<int>(
   (ref) => Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick),
 );
+
+/// The service terminal's own zoom — same shape as `LibraryZoomNotifier`
+/// (`library_controller.dart`): a synchronous default so the first frame
+/// never flashes the wrong size, the real persisted value loading a moment
+/// later.
+const terminalFontSizes = [11.0, 13.0, 15.0, 17.0];
+
+class TerminalFontSizeNotifier extends Notifier<double> {
+  static const _prefsKey = 'terminal_font_size';
+  static const _default = 13.0;
+
+  @override
+  double build() {
+    _load();
+    return _default;
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getDouble(_prefsKey);
+    if (saved != null && terminalFontSizes.contains(saved)) state = saved;
+  }
+
+  Future<void> _set(double value) async {
+    state = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_prefsKey, value);
+  }
+
+  void increase() {
+    final next = terminalFontSizes.where((size) => size > state).firstOrNull;
+    if (next != null) _set(next);
+  }
+
+  void decrease() {
+    final next = terminalFontSizes.reversed.where((size) => size < state).firstOrNull;
+    if (next != null) _set(next);
+  }
+}
+
+final terminalFontSizeProvider = NotifierProvider<TerminalFontSizeNotifier, double>(TerminalFontSizeNotifier.new);
 
 /// The agent's 409s carry a sentence worth showing ("port 5037 is held by an
 /// external process (pid 20840); use takeover to replace it"); anything else

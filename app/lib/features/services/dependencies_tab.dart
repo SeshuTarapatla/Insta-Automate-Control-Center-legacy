@@ -5,11 +5,22 @@ import 'package:phosphor_flutter/phosphor_flutter.dart';
 import '../../ui/feedback.dart';
 import '../../core/dependency_models.dart';
 import '../../core/theme/tokens.dart';
+import '../../ui/data.dart';
 import '../../ui/icons.dart';
+import '../../ui/overlays.dart';
+import '../../ui/status.dart';
 import '../../ui/surfaces.dart';
 import '../../ui/text.dart';
 import 'dependencies_controller.dart';
 import 'services_controller.dart';
+
+extension _DependencyLevelStatusKindX on DependencyLevel {
+  StatusKind get statusKind => switch (this) {
+    DependencyLevel.ok => StatusKind.good,
+    DependencyLevel.warn => StatusKind.warn,
+    DependencyLevel.fail => StatusKind.bad,
+  };
+}
 
 /// `ui/status.dart`'s icon vocabulary lives behind `AppIcons`
 /// (a `ui/` concern) — `core/dependency_models.dart` can't reach it without
@@ -37,6 +48,11 @@ class DependenciesTab extends ConsumerStatefulWidget {
 class _DependenciesTabState extends ConsumerState<DependenciesTab> {
   bool _refreshing = false;
 
+  // Worst-first by default (`DependencyLevel`'s declared order is
+  // ok/warn/fail, so descending sorts fail to the top) — "the value is
+  // knowing which one is why a flow is failing," not which group it's in.
+  AppTableSort _sort = const AppTableSort(columnIndex: 2, ascending: false);
+
   Future<void> _refresh() async {
     setState(() => _refreshing = true);
     await ref.read(dependenciesControllerProvider.notifier).refresh();
@@ -53,22 +69,28 @@ class _DependenciesTabState extends ConsumerState<DependenciesTab> {
       onRetry: _refresh,
       data: (snapshot) {
         final tokens = theme.tokens;
+        final columns = dependencyTableColumns();
+        final sortKey = columns[_sort.columnIndex].sortKey;
+        var rows = snapshot.items;
+        if (sortKey != null) {
+          rows = [...rows]..sort((a, b) => sortKey(a).compareTo(sortKey(b)));
+          if (!_sort.ascending) rows = rows.reversed.toList();
+        }
+
         return ListView(
           padding: EdgeInsets.all(tokens.space.lg),
           children: [
             _summary(theme, snapshot),
             SizedBox(height: tokens.space.xl),
-            for (final group in DependencyGroup.values)
-              if (snapshot.inGroup(group).isNotEmpty) ...[
-                _groupHeader(theme, group),
-                SizedBox(height: tokens.space.sm),
-                for (final dependency in snapshot.inGroup(group))
-                  Padding(
-                    padding: EdgeInsets.only(bottom: tokens.space.sm),
-                    child: DependencyRow(dependency: dependency),
-                  ),
-                SizedBox(height: tokens.space.lg + tokens.space.xs),
-              ],
+            AppPanel(
+              padding: EdgeInsets.zero,
+              child: AppTable<Dependency>(
+                columns: columns,
+                rows: rows,
+                sort: _sort,
+                onSort: (sort) => setState(() => _sort = sort),
+              ),
+            ),
           ],
         );
       },
@@ -122,27 +144,66 @@ class _DependenciesTabState extends ConsumerState<DependenciesTab> {
       ),
     );
   }
-
-  Widget _groupHeader(ThemeData theme, DependencyGroup group) {
-    final tokens = theme.tokens;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.baseline,
-      textBaseline: TextBaseline.alphabetic,
-      children: [
-        Text(group.label, style: theme.textTheme.titleSmall),
-        SizedBox(width: tokens.space.sm),
-        Expanded(
-          child: Text(group.blurb, style: theme.textTheme.bodySmall?.copyWith(color: tokens.content.secondary)),
-        ),
-      ],
-    );
-  }
 }
 
-/// Public for the layout test: a failing dependency's sentence is the longest
-/// text on the screen, and it has to survive the narrow pane.
-class DependencyRow extends StatelessWidget {
-  const DependencyRow({super.key, required this.dependency});
+/// Public for the layout test: a failing dependency's long detail sentence is
+/// the longest text on the screen, and the flexible Detail column has to
+/// survive the narrow pane without overflowing. One flat, sortable table
+/// across all ten dependencies (not the four group sections the old bespoke
+/// rows had) — sorting by State surfaces every failure together regardless of
+/// which group it's in, the more operationally useful default. Each group's
+/// explanatory blurb moves into a tooltip on its row's Group cell instead of
+/// a standing text block, so the context isn't lost, just no longer
+/// always-on.
+List<AppTableColumn<Dependency>> dependencyTableColumns() => [
+  AppTableColumn<Dependency>(
+    label: 'Group',
+    width: 90,
+    sortable: true,
+    sortKey: (d) => d.group.label,
+    cell: (d) => AppTooltip(
+      rich: true,
+      title: d.group.label,
+      message: d.group.blurb,
+      child: Text(d.group.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+    ),
+  ),
+  AppTableColumn<Dependency>(
+    label: 'Name',
+    width: 140,
+    sortable: true,
+    sortKey: (d) => d.label,
+    cell: (d) => Text(d.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+  ),
+  AppTableColumn<Dependency>(
+    label: 'State',
+    width: 110,
+    sortable: true,
+    sortKey: (d) => d.level.index,
+    cell: (d) => StatusChip(kind: d.level.statusKind, label: _levelLabel(d.level), dense: true),
+  ),
+  AppTableColumn<Dependency>(label: 'Detail', cell: (d) => _DetailCell(dependency: d)),
+  AppTableColumn<Dependency>(
+    label: 'Latency',
+    width: 90,
+    numeric: true,
+    sortable: true,
+    sortKey: (d) => d.latencyMs,
+    cell: (d) => NumericText(
+      '${d.latencyMs.round()} ms',
+      role: TextRole.caption,
+    ),
+  ),
+];
+
+String _levelLabel(DependencyLevel level) => switch (level) {
+  DependencyLevel.ok => 'OK',
+  DependencyLevel.warn => 'Warning',
+  DependencyLevel.fail => 'Failed',
+};
+
+class _DetailCell extends StatelessWidget {
+  const _DetailCell({required this.dependency});
 
   final Dependency dependency;
 
@@ -150,43 +211,10 @@ class DependencyRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tokens = theme.tokens;
-    final color = dependency.level.color(theme);
-
-    return AppPanel(
-      level: SurfaceLevel.raised,
-      padding: EdgeInsets.symmetric(horizontal: tokens.space.md, vertical: tokens.space.sm + 1),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: EdgeInsets.only(top: tokens.space.xs / 2),
-            child: AppIcon(dependency.level.glyph, size: IconSize.sm, color: color),
-          ),
-          SizedBox(width: tokens.space.md),
-          SizedBox(
-            width: 140,
-            child: Text(
-              dependency.label,
-              style: theme.textTheme.bodyMedium,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          Expanded(
-            child: Text(
-              dependency.detail,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: dependency.level == DependencyLevel.ok ? tokens.content.secondary : null,
-              ),
-            ),
-          ),
-          SizedBox(width: tokens.space.md),
-          NumericText(
-            '${dependency.latencyMs.round()} ms',
-            role: TextRole.caption,
-            color: tokens.content.secondary.withValues(alpha: 0.7),
-          ),
-        ],
+    return Text(
+      dependency.detail,
+      style: theme.textTheme.bodySmall?.copyWith(
+        color: dependency.level == DependencyLevel.ok ? tokens.content.secondary : null,
       ),
     );
   }

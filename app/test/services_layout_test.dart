@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:ia_control_center/core/dependency_models.dart';
 import 'package:ia_control_center/core/service_models.dart';
@@ -8,6 +9,7 @@ import 'package:ia_control_center/features/services/dependencies_tab.dart';
 import 'package:ia_control_center/features/services/service_detail.dart';
 import 'package:ia_control_center/features/services/service_tile.dart';
 import 'package:ia_control_center/features/services/services_controller.dart';
+import 'package:ia_control_center/ui/data.dart';
 
 /// Overflow is a paint-time error, so it does not show up in `flutter analyze`
 /// and it does not show up in an agent-side test either — it showed up in a
@@ -103,6 +105,8 @@ Future<void> _render(WidgetTester tester, Size size, Widget child) async {
 }
 
 void main() {
+  setUp(() => SharedPreferences.setMockInitialValues({}));
+
   group('ServiceDetail lays out without overflow', () {
     for (final entry in _paneSizes.entries) {
       testWidgets('${entry.key}, external with a long model path', (tester) async {
@@ -141,6 +145,26 @@ void main() {
     });
   });
 
+  testWidgets('the terminal frame exposes Smaller/Larger text and Clear screen controls', (tester) async {
+    await _render(tester, _narrow, ServiceDetail(status: _status()));
+    expect(find.bySemanticsLabel('Smaller text'), findsOneWidget);
+    expect(find.bySemanticsLabel('Larger text'), findsOneWidget);
+    expect(find.bySemanticsLabel('Clear screen'), findsOneWidget);
+
+    // Cycling the font size a few steps in each direction should never throw,
+    // even once it hits either end of `terminalFontSizes` and the button
+    // disables itself.
+    for (var i = 0; i < 5; i++) {
+      await tester.tap(find.bySemanticsLabel('Larger text'), warnIfMissed: false);
+      await tester.pump();
+    }
+    for (var i = 0; i < 5; i++) {
+      await tester.tap(find.bySemanticsLabel('Smaller text'), warnIfMissed: false);
+      await tester.pump();
+    }
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('ServiceTile lays out at its fixed 300 px', (tester) async {
     await _render(
       tester,
@@ -157,22 +181,21 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('DependencyRow lays out with a long detail sentence', (tester) async {
+  testWidgets('Dependencies AppTable lays out with a long detail sentence', (tester) async {
+    const dependency = Dependency(
+      key: 'postgres',
+      label: 'postgres',
+      group: DependencyGroup.cluster,
+      level: DependencyLevel.fail,
+      detail: 'could not read the k3s postgres-secret: Unauthorized — the cluster is '
+          'unreachable, so this is a credential failure rather than a database one',
+      metrics: {},
+      latencyMs: 10012.5,
+    );
     await _render(
       tester,
       _narrow,
-      DependencyRow(
-        dependency: const Dependency(
-          key: 'postgres',
-          label: 'postgres',
-          group: DependencyGroup.cluster,
-          level: DependencyLevel.fail,
-          detail: 'could not read the k3s postgres-secret: Unauthorized — the cluster is '
-              'unreachable, so this is a credential failure rather than a database one',
-          metrics: {},
-          latencyMs: 10012.5,
-        ),
-      ),
+      AppTable<Dependency>(columns: dependencyTableColumns(), rows: const [dependency]),
     );
     expect(tester.takeException(), isNull);
   });

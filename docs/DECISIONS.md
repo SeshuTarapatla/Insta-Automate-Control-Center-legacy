@@ -5,6 +5,115 @@ session can tell a settled question from an open one.
 
 ---
 
+## 2026-08-10 — V2.11 (Services, Insights, Settings) built out of D107's planned sequence order, at your explicit request (D118)
+
+### D118 · V2.11 built before V2.12; several of PLAN_V2.md's own premises were already stale; `AppTable` gets its first real call sites; one real overflow bug found by the extended test suite
+
+**Order swap, not a re-plan.** D107 sequenced the "functional" group as V2.10 → V2.12 → V2.11,
+V2.11 last since its own additions (terminal search/copy/font-size, resizable panes) were judged
+least load-bearing. You asked to do V2.11 first instead. PLAN_V2.md's own sequencing notes already
+say nothing in V2.5–V2.12 depends on anything else in that range, so the swap is safe — V2.12
+(Command palette) is simply next once this checkpoint is confirmed.
+
+**Surveyed before writing any code** (three parallel Explore passes over Services/Insights/
+Settings plus the current `app/lib/ui/` component library) and found several of PLAN_V2.md's
+premises already fixed by earlier checkpoints or already built with the exact shape needed —
+skipped rather than redone: `service_detail.dart`'s claimed hardcoded hex colors (none found, already
+tokened via `tokens.status.*`), `service_terminal.dart`'s claimed hardcoded `'Consolas'`/inline
+`TerminalTheme` (already fully `tokens.terminal`-driven since an earlier checkpoint), and
+`devices_tab.dart`'s claimed `Colors.white` QR quiet-zone (already `tokens.chart.qrQuietZone`,
+defined per-theme). Also found: `AppTable` (COMPONENTS §10) has existed since it was built but had
+**zero real call sites anywhere in the app** — this checkpoint gives it three (Ranking, Dependencies,
+Ops job history), the first real proof the D77 flexible-column invariant holds outside its own
+synthetic test.
+
+**One shared-component change**: `AppTable` gained an optional `isSelected: bool Function(T)?`
+(tints a row like a selected list tile) — Ops' job history needs it to show which job's log is open
+next to it, the same way `AppPanel` gained `accentEdge` and `AppButton` gained `busy` from their own
+first real callers. `IconAction.icon` was widened from a raw Flutter `IconData` to the same
+`PhosphorIconData Function(PhosphorIconsStyle)` shape `AppIcon` already uses — its first real call
+site (the Services terminal's new Clear/font-size/Find/Copy controls) revealed the original type
+couldn't actually take any of this app's own `AppIcons.*` glyphs at all.
+
+**Services**: `ResizableSplit` replaces the fixed 300px list↔detail split and, new, a fixed
+"panels minus terminal floor" calculation inside `ServiceDetail` (now a real vertical
+`ResizableSplit`, `services.detail.split`). `ServiceTile` gained `accentEdge` off the existing
+`ServiceStateStatusKindX` bridge; the self-heal icon's plain `Tooltip` became a rich `AppTooltip`
+with a title/body split. The terminal frame gained two genuinely new pieces with no existing
+pattern to adapt (`LogConsole` has neither either): a **Clear** button (`Terminal.eraseDisplay()`,
+confirmed present on `xterm: ^4.0.0`, a local-only visual clear — the next replay/reconnect still
+repopulates from the agent's ring) and a persisted **font-size** control (`TerminalFontSizeNotifier`,
+same synchronous-default-then-load shape as `LibraryZoomNotifier`, four steps 11–17px). Every
+header/search-bar icon button migrated to `IconAction`.
+
+**Dependencies — a judgment call, not literally what SCREENS §4 pictured.** Its "ten dependencies
+as sortable rows (name · state · detail · latency)" reads naturally as one flat, sortable
+`AppTable` across all ten rather than the four group-partitioned sections the old bespoke rows had
+— sorting by State (worst-first default) surfaces every failure together regardless of group,
+matching the file's own standing comment ("the value is knowing which one is why a flow is
+failing"). Each group's explanatory blurb moved from an always-on text block into a rich
+`AppTooltip` on the row's Group cell.
+
+**Insights**: `AppPage.maxContentWidth: 900` replaces `FunnelTab`'s own local `ConstrainedBox`,
+now applied to all three tabs per the plan text, not just Funnel. `RankingTab`'s D77 hand-built
+table is now a real `AppTable<EntityRanking>` — same columns, same row-tap-opens-the-entity-
+dialog, sort state moved to `AppTableSort`. `FunnelChart` retokened to `tokens.chart.*` (was
+`ColorScheme.primary`/`.surface`) and gained a real stage-by-stage draw-in animation — a new
+`StatefulWidget` driving a `reveal: List<double>` into `_FunnelPainter` via per-stage `Interval`
+sub-animations (each stage's own interval doesn't begin until the previous one's has finished, so
+by the time a later stage starts revealing the earlier one is already at its real, static width),
+collapsing to instant under `tokens.motion.reduced`. `BurndownTab` gained the "today vs cap"
+summary strip by reusing Overview's `CapsTile` directly (already exactly the right shape, no new
+widget needed) above the day-range chips. Cross-links: `Scanned`/`Female`/`Scraped` funnel stages
+jump to their matching Library folder (`scanned/`, `gender_valid/`, `scraped/`) via the same
+`_openLibrary` pattern `CurationTile` already uses; `Private` and `Followed` stay plain labels —
+neither has a real matching folder (same reasoning D81 used to drop both from the per-entity yield
+dialog), so neither gets a link that would land somewhere misleading.
+
+**Settings**: `LimitsTab`'s ad hoc group `Text` headers became `SectionHeader(title, caption)`.
+`DevicesTab` gained two `SectionHeader`s for visual consistency — otherwise already close to spec
+(QR quiet-zone and `AppPanel` structure both already done, per the stale-premise findings above).
+`switches_tab.dart`'s migration to `AppSwitch(confirmMessage: ...)` was evaluated and **not done**:
+`AppSwitch`'s confirm dialog has a fixed generic title ("Turn this off?"), while
+`confirmFlowSwitch`'s current dialog title names the exact flow ("Turn off ENTITY_SCAN?") and the
+per-flow consequence body text never repeats the flow name itself — migrating would have silently
+dropped which flow the dialog is even about. Left as its existing hand-rolled, flow-specific
+version rather than force an optional simplification through a real information loss.
+`queue_tab.dart` was already compliant (its one numeric field already renders through
+`NumericText`; the count chips are composed label strings via `StatusChip`, matching every other
+composed-count chip in the app, not a bare numeric display).
+
+**Ops job history → `AppTable`, one real overflow bug found by the extended test suite, not by
+writing the code.** The first version used the plan's literal four columns (Status/Job/Started/
+Elapsed); `ops_layout_test.dart`'s existing 1024×700 overflow test caught a real `RenderFlex`
+overflow immediately — the History sidebar is a fixed 280px, ~250px once the table's own row
+padding is subtracted, and three fixed-width columns (90+110+90) alone already exceeded that
+before the flexible Job column got anything. Fixed by combining Started/Elapsed into one narrow
+`_WhenCell` (two stacked lines: relative time, then elapsed) instead of dropping either piece of
+information. The elapsed timer itself reuses `run_summary.dart`'s exact `StreamProvider.autoDispose`
+tick pattern (watched only while `status == running`, so finished rows never rebuild on the clock)
+and `flow_status.dart`'s existing `formatFlowCountdown`, not a new formatter. The five destructive-
+job confirm dialogs, the button grid's D72 overflow fix, and the log panel are all untouched, per
+the plan's explicit instruction.
+
+**Verified:** `flutter analyze` clean throughout every round. `flutter test`: 214 total, 213
+passing — the one failure (`shell_layout_test.dart`'s "rail expanded" case, an icon-size assertion
+unrelated to anything touched here) reproduced identically via `git stash` on the branch tip
+*before* any of this session's changes, confirming it's the same pre-existing, standing issue
+D114/D116 already documented, not a regression. New/extended coverage: `ui/data_test.dart` (the
+`isSelected` tint), `services_layout_test.dart` (the new terminal controls, the Dependencies table
+with a long detail sentence), `insights_layout_test.dart` (funnel stage tap → `selectedFolderProvider`/
+`selectedNavIndexProvider`, `CapsTile` present in `BurndownTab`), `ops_layout_test.dart` (the
+overflow catch above, plus a deterministic finished-job elapsed-value check), `devices_layout_test.dart`
+(the new `SectionHeader`s render without overflow). `flutter build windows --debug` succeeds. Built
+and started for you per rule 5 — **your checkpoint test is what's still open**: terminal search/
+copy/clear/font-size against a real streaming service; Ranking sorts and rows still open the
+entity dialog; run one non-destructive ops job (Deploy flows / Reset work pool) and watch the live
+log + elapsed timer; confirm the five destructive jobs still prompt; funnel stage taps land on the
+right Library folder; Dependencies sorts by state with failures surfaced together.
+
+**You confirmed the full checkpoint test live 2026-08-10 — V2.11 accepted.**
+
 ## 2026-08-09 — adb self-heal crash-looped forever once the phone was disconnected, colliding with a stray external `adb start-server` it could never recognize (D117)
 
 ### D117 · Two chained self-heal bugs, both only reachable with no phone attached: blind respawn colliding with a stray external adb daemon, and a 60s restart-forever loop against a perfectly healthy server

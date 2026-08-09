@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/service_models.dart';
 import '../../core/theme/tokens.dart';
 import '../../ui/icons.dart';
+import '../../ui/overlays.dart';
 import '../../ui/status.dart';
 import '../../ui/surfaces.dart';
 import '../../ui/text.dart';
@@ -36,6 +37,7 @@ class ServiceTile extends ConsumerWidget {
     return AppCard(
       onTap: onTap,
       selected: selected,
+      accentEdge: status.state.statusKind,
       padding: EdgeInsets.symmetric(horizontal: tokens.space.md, vertical: tokens.space.sm),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -52,8 +54,10 @@ class ServiceTile extends ConsumerWidget {
                 ),
               ),
               if (!status.selfHeal)
-                Tooltip(
-                  message: 'Self-heal is off — a crash stays a crash',
+                AppTooltip(
+                  rich: true,
+                  title: 'Self-heal is off',
+                  message: 'A crash stays a crash — this service will not restart itself.',
                   child: AppIcon(AppIcons.selfHeal, size: IconSize.sm, color: tokens.content.secondary),
                 ),
             ],

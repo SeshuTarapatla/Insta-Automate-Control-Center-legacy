@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../ui/feedback.dart';
 import '../../core/service_models.dart';
 import '../../core/theme/tokens.dart';
+import '../../ui/layout.dart';
 import '../../ui/page.dart';
 import '../../ui/status.dart';
 import 'dependencies_tab.dart';
@@ -51,18 +52,14 @@ class _SupervisedTab extends ConsumerWidget {
           (service) => service.name == selectedName,
           orElse: () => services.first,
         );
-        final tokens = theme.tokens;
 
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 300,
-              child: _ServiceList(services: services, selected: selected, theme: theme),
-            ),
-            SizedBox(width: tokens.space.xl),
-            Expanded(child: ServiceDetail(status: selected)),
-          ],
+        return ResizableSplit(
+          persistKey: 'services.split',
+          initialFirstSize: 300,
+          minFirst: 220,
+          minSecond: 400,
+          first: _ServiceList(services: services, selected: selected, theme: theme),
+          second: ServiceDetail(status: selected),
         );
       },
     );

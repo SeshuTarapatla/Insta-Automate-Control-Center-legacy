@@ -11,6 +11,7 @@ import '../../core/relative_time.dart';
 import '../../core/theme/tokens.dart';
 import '../../ui/feedback.dart';
 import '../../ui/icons.dart';
+import '../../ui/page.dart';
 import '../../ui/surfaces.dart';
 import '../../ui/text.dart';
 import 'devices_controller.dart';
@@ -34,17 +35,15 @@ class DevicesTab extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Pair a phone', style: theme.textTheme.titleMedium),
-          SizedBox(height: tokens.space.xs),
-          Text(
-            'Scan the QR code from the Insta-Automate mobile app to receive live notifications '
-            'on your phone.',
-            style: theme.textTheme.bodySmall?.copyWith(color: tokens.content.secondary),
+          SectionHeader(
+            title: 'Pair a phone',
+            caption: 'Scan the QR code from the Insta-Automate mobile app to receive live '
+                'notifications on your phone.',
           ),
           SizedBox(height: tokens.space.lg),
           const _PairingCard(),
           SizedBox(height: tokens.space.xxl),
-          Text('Paired devices', style: theme.textTheme.titleMedium),
+          const SectionHeader(title: 'Paired devices'),
           SizedBox(height: tokens.space.sm),
           devicesAsync.stateView(
             describeError: (error) => 'Failed to load devices: $error',

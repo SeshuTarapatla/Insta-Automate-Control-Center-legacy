@@ -11,10 +11,13 @@ import '../../core/ops_confirm.dart';
 import '../../core/ops_models.dart';
 import '../../core/relative_time.dart';
 import '../../core/theme/tokens.dart';
+import '../../ui/data.dart';
 import '../../ui/icons.dart';
 import '../../ui/layout.dart';
+import '../../ui/status.dart';
 import '../../ui/surfaces.dart';
 import '../../ui/text.dart';
+import '../flows/flow_status.dart';
 import '../services/services_controller.dart' show describeAgentError;
 import 'ops_controller.dart';
 
@@ -180,6 +183,38 @@ class _JobButton extends StatelessWidget {
   }
 }
 
+// The sidebar this table sits in is a fixed 280 px, ~250 px once the table's
+// own row padding is subtracted — real overflow found by `ops_layout_test.dart`,
+// not by writing this list. Four columns at readable widths don't fit that;
+// "Started" and "Elapsed" share one narrow column (`_WhenCell`, two stacked
+// lines) rather than dropping either piece of information.
+List<AppTableColumn<OpsJob>> _jobHistoryColumns() => [
+  AppTableColumn<OpsJob>(label: '', width: 28, cell: (job) => _StatusCell(status: job.status)),
+  AppTableColumn<OpsJob>(label: 'Job', cell: (job) => Text(job.label, maxLines: 1, overflow: TextOverflow.ellipsis)),
+  AppTableColumn<OpsJob>(label: 'When', width: 84, cell: (job) => _WhenCell(job: job)),
+];
+
+/// A small widget rather than a bare glyph/color function, since resolving
+/// `StatusKind.fg` needs the ambient theme — `AppTableColumn.cell` only gets
+/// the row, not a `BuildContext`.
+class _StatusCell extends StatelessWidget {
+  const _StatusCell({required this.status});
+
+  final OpsJobStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).tokens;
+    final (glyph, kind) = switch (status) {
+      OpsJobStatus.running => (AppIcons.sync, StatusKind.info),
+      OpsJobStatus.succeeded => (AppIcons.success, StatusKind.good),
+      OpsJobStatus.failed => (AppIcons.error, StatusKind.bad),
+      OpsJobStatus.interrupted => (AppIcons.linkOff, StatusKind.neutral),
+    };
+    return AppIcon(glyph, size: IconSize.sm, color: kind.fg(tokens));
+  }
+}
+
 class _JobHistory extends StatelessWidget {
   const _JobHistory({required this.jobs, required this.loading, required this.selectedId, required this.onSelect});
 
@@ -207,14 +242,14 @@ class _JobHistory extends StatelessWidget {
           Expanded(
             child: loading
                 ? const LoadingView()
-                : jobs.isEmpty
-                ? const EmptyView(icon: Icons.history_toggle_off, title: 'No jobs run yet.')
-                : ListView.builder(
-                    itemCount: jobs.length,
-                    itemBuilder: (context, index) {
-                      final job = jobs[index];
-                      return _JobHistoryTile(job: job, selected: job.id == selectedId, onTap: () => onSelect(job.id));
-                    },
+                : SingleChildScrollView(
+                    child: AppTable<OpsJob>(
+                      columns: _jobHistoryColumns(),
+                      rows: jobs,
+                      onRowTap: (job) => onSelect(job.id),
+                      isSelected: (job) => job.id == selectedId,
+                      emptyState: const EmptyView(icon: Icons.history_toggle_off, title: 'No jobs run yet.'),
+                    ),
                   ),
           ),
         ],
@@ -223,51 +258,39 @@ class _JobHistory extends StatelessWidget {
   }
 }
 
-class _JobHistoryTile extends StatelessWidget {
-  const _JobHistoryTile({required this.job, required this.selected, required this.onTap});
+/// Ticks once a second while its job is `running`, same
+/// `StreamProvider.autoDispose` shape as `run_summary.dart`'s own elapsed
+/// timer — a finished row never rebuilds on the clock.
+final opsTickProvider = StreamProvider.autoDispose<int>(
+  (ref) => Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick),
+);
+
+/// "started 2m ago" over "how long it ran" — both real, neither redundant
+/// with the other once a job is actually running (relative time keeps
+/// moving; elapsed only starts mattering once something is in flight).
+class _WhenCell extends ConsumerWidget {
+  const _WhenCell({required this.job});
 
   final OpsJob job;
-  final bool selected;
-  final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final tokens = theme.tokens;
-    final (glyph, color) = switch (job.status) {
-      OpsJobStatus.running => (AppIcons.sync, scheme.primary),
-      OpsJobStatus.succeeded => (AppIcons.success, tokens.status.good.fg),
-      OpsJobStatus.failed => (AppIcons.error, scheme.error),
-      OpsJobStatus.interrupted => (AppIcons.linkOff, tokens.content.secondary),
-    };
-
-    return Material(
-      color: selected ? scheme.primaryContainer.withValues(alpha: 0.4) : Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: tokens.space.md, vertical: tokens.space.sm),
-          child: Row(
-            children: [
-              AppIcon(glyph, size: IconSize.sm, color: color),
-              SizedBox(width: tokens.space.sm),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(job.label, style: theme.textTheme.bodyMedium, overflow: TextOverflow.ellipsis),
-                    Text(
-                      relativeTime(job.startedAt),
-                      style: theme.textTheme.labelSmall?.copyWith(color: tokens.content.secondary),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (job.status == OpsJobStatus.running) ref.watch(opsTickProvider);
+    final tokens = Theme.of(context).tokens;
+    final end = job.endedAt ?? DateTime.now().toUtc();
+    final elapsed = end.toUtc().difference(job.startedAt.toUtc());
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          relativeTime(job.startedAt),
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(color: tokens.content.secondary),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
         ),
-      ),
+        NumericText(formatFlowCountdown(elapsed), role: TextRole.caption),
+      ],
     );
   }
 }

@@ -59,6 +59,7 @@ class AppIcons {
   static PhosphorIconData search(PhosphorIconsStyle w) => PhosphorIcons.magnifyingGlass(w);
   static PhosphorIconData close(PhosphorIconsStyle w) => PhosphorIcons.x(w);
   static PhosphorIconData copy(PhosphorIconsStyle w) => PhosphorIcons.copy(w);
+  static PhosphorIconData clear(PhosphorIconsStyle w) => PhosphorIcons.eraser(w);
   static PhosphorIconData openExternal(PhosphorIconsStyle w) => PhosphorIcons.arrowSquareOut(w);
   static PhosphorIconData folderOpen(PhosphorIconsStyle w) => PhosphorIcons.folderOpen(w);
   static PhosphorIconData folderOff(PhosphorIconsStyle w) => PhosphorIcons.folderMinus(w);

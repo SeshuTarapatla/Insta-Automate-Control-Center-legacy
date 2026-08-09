@@ -1,5 +1,6 @@
 // COMPONENTS.md §4 — buttons and actions.
 import 'package:flutter/material.dart';
+import 'package:phosphor_flutter/phosphor_flutter.dart';
 
 import '../core/theme/tokens.dart';
 import 'status.dart';
@@ -96,7 +97,11 @@ class AppButton extends StatelessWidget {
 /// An icon-only action. `tooltip` is **required** — a compile-time guarantee
 /// rather than a convention — and doubles as the `Semantics` label, closing
 /// the accessibility gap DESIGN_SYSTEM §6 flags (icon buttons with tooltips
-/// today are inconsistent, not universal).
+/// today are inconsistent, not universal). `icon` takes the same
+/// `AppIcons.*`-shaped glyph function `AppIcon` does (not a raw `IconData`),
+/// resolved at the theme's own weight — found by this widget's first real
+/// call site (the Services terminal frame, V2.11), the same way `AppPanel`
+/// gained `accentEdge` and `AppButton` gained `busy` from theirs.
 class IconAction extends StatelessWidget {
   const IconAction({
     super.key,
@@ -107,7 +112,7 @@ class IconAction extends StatelessWidget {
     this.kind,
   });
 
-  final IconData icon;
+  final PhosphorIconData Function(PhosphorIconsStyle) icon;
   final VoidCallback? onPressed;
   final String tooltip;
   final ButtonSize size;
@@ -128,7 +133,10 @@ class IconAction extends StatelessWidget {
         child: IconButton(
           onPressed: onPressed,
           color: color,
-          icon: Icon(icon, size: size == ButtonSize.sm ? tokens.space.iconSm : tokens.space.iconMd),
+          icon: Icon(
+            icon(tokens.typography.iconWeight),
+            size: size == ButtonSize.sm ? tokens.space.iconSm : tokens.space.iconMd,
+          ),
         ),
       ),
     );

@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:phosphor_flutter/phosphor_flutter.dart';
 
 import '../../core/app_snack_bar.dart';
 import '../../core/service_models.dart';
 import '../../core/theme/tokens.dart';
+import '../../ui/buttons.dart';
 import '../../ui/icons.dart';
 import '../../ui/layout.dart';
 import '../../ui/status.dart';
@@ -13,10 +13,6 @@ import '../../ui/text.dart';
 import 'service_status_kind.dart';
 import 'service_terminal.dart';
 import 'services_controller.dart';
-
-/// The terminal never shrinks below this, however cramped the window: a pane
-/// squeezed to a couple of rows is worse than one you have to scroll to.
-const _minTerminalHeight = 220.0;
 
 /// What actually stops working while a service is down. A confirmation without
 /// a consequence is not a confirmation — same rule as the flow switches.
@@ -158,39 +154,30 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
     // At the 1024 px minimum window this pane is ~550 wide, where the stat
     // chips wrap onto four rows and every card's text wraps with them — the
     // panels above the terminal can genuinely want more height than the window
-    // has. Capping them at "everything except the terminal's floor" means they
-    // scroll among themselves instead of pushing the terminal off the bottom,
-    // and because the cap is a maximum rather than a share, a tall window still
-    // gives the terminal every pixel the panels do not use.
-    return LayoutBuilder(
-      builder: (context, constraints) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: (constraints.maxHeight - _minTerminalHeight - tokens.space.lg).clamp(
-                0.0,
-                double.infinity,
-              ),
-            ),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _header(theme, status),
-                  SizedBox(height: tokens.space.lg),
-                  _stats(theme, status),
-                  SizedBox(height: tokens.space.md),
-                  _switches(theme, status),
-                  if (status.hasTest) ...[SizedBox(height: tokens.space.md), _testPanel(theme, status)],
-                ],
-              ),
-            ),
-          ),
-          SizedBox(height: tokens.space.lg),
-          Expanded(child: ServiceTerminal(key: ValueKey(status.name), status: status)),
-        ],
+    // has. A vertical `ResizableSplit` replaces the old fixed "everything
+    // except the terminal's floor" calculation: the panels scroll among
+    // themselves within whatever share of the height the user has dragged for
+    // them, and the terminal keeps the rest.
+    return ResizableSplit(
+      axis: Axis.vertical,
+      persistKey: 'services.detail.split',
+      initialFirstSize: 360,
+      minFirst: 260,
+      minSecond: 220,
+      first: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _header(theme, status),
+            SizedBox(height: tokens.space.lg),
+            _stats(theme, status),
+            SizedBox(height: tokens.space.md),
+            _switches(theme, status),
+            if (status.hasTest) ...[SizedBox(height: tokens.space.md), _testPanel(theme, status)],
+          ],
+        ),
       ),
+      second: ServiceTerminal(key: ValueKey(status.name), status: status),
     );
   }
 
@@ -251,48 +238,48 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
   Widget _actions(ServiceStatus status) {
     final busy = _busy != null;
 
-    return Wrap(
-      spacing: 8,
+    return ButtonGroup(
       children: [
         if (status.canTakeover)
-          FilledButton.icon(
+          AppButton(
+            label: 'Take over',
+            tone: ButtonTone.primary,
+            filled: true,
+            busy: _busy == 'takeover',
             onPressed: busy ? null : _takeover,
-            icon: _icon('takeover', AppIcons.swap),
-            label: const Text('Take over'),
           )
         else if (status.isRunning)
-          OutlinedButton.icon(
+          AppButton(
+            label: 'Restart',
+            busy: _busy == 'restart',
             onPressed: busy ? null : _restart,
-            icon: _icon('restart', AppIcons.refresh),
-            label: const Text('Restart'),
           )
         else
-          FilledButton.icon(
+          AppButton(
+            label: 'Start',
+            tone: ButtonTone.primary,
+            filled: true,
+            busy: _busy == 'start',
             onPressed: busy ? null : _start,
-            icon: _icon('start', AppIcons.play),
-            label: const Text('Start'),
           ),
         if (status.canStop)
-          OutlinedButton.icon(
+          AppButton(
+            label: 'Stop',
+            tone: ButtonTone.danger,
+            busy: _busy == 'stop',
             onPressed: busy ? null : _stop,
-            icon: _icon('stop', AppIcons.stop),
-            label: const Text('Stop'),
           ),
         if (status.hasTest)
-          OutlinedButton.icon(
+          AppButton(
+            label: 'Test',
+            busy: _busy == 'test',
             // The test needs something to talk to; an external process still
             // answers on the port, so it is testable without being ours.
             onPressed: busy || !status.isRunning ? null : _test,
-            icon: _icon('test', AppIcons.science),
-            label: const Text('Test'),
           ),
       ],
     );
   }
-
-  Widget _icon(String action, PhosphorIconData Function(PhosphorIconsStyle) glyph) => _busy == action
-      ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2))
-      : AppIcon(glyph, size: IconSize.sm);
 
   // ----------------------------------------------------------------- stats
 

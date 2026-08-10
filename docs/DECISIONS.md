@@ -5,6 +5,97 @@ session can tell a settled question from an open one.
 
 ---
 
+## 2026-08-10 — V2.13.2 (Library review mode refinements) built, app-only, awaiting your checkpoint test (D123)
+
+### D123 · Review's nav entry gets the real stage-priority list; Apply runs on decided images only via move+delete; review mode stays embedded instead of full-screen
+
+**Finding #1 fixed — the nav rail's Review entry can now land on `gender_invalid`.**
+`shell/nav_rail.dart`'s `openReview()` picked `curationFolders.first` unconditionally —
+`curationFolders` (`overview/curation_tile.dart`) is `['gender_valid', 'scraped']`,
+deliberately narrowed for Overview's own "needs attention" surface (D115) and left untouched
+here on purpose. New `review_page.dart::openReviewModeForFirstBacklog(folderPriority)` walks
+`libraryStageGroups`' own YOUR REVIEW group (`gender_invalid → gender_valid → scraped`, the
+real stage order, already the one source of truth D115's last addendum established) and picks
+the first folder with a nonzero backlog, then defers to the existing
+`openReviewModeForFolder` to pick that folder's first entity with a real backlog. The nav
+rail's own `reviewCount` badge and its Review-sub-item "selected" highlight were widened to the
+same three-folder list for the same reason — a badge reading only two of the three real
+review-stage folders would have been inconsistent with an entry point that can now land on all
+three. `curationFolders` itself, and every surface D115 deliberately narrowed it for (the
+Overview hero tile, the curation tile's own badge and "Review →" button, the command palette's
+two explicit per-folder `Review: gender_valid`/`Review: scraped` commands), is untouched — the
+plan's own fix explicitly scoped this to "the nav rail's Review entry," not every consumer of
+`curationFolders`.
+
+**Finding #2 fixed — Apply runs on whatever's actually been decided, not the whole loaded set.**
+`review_page.dart`'s old `canApply` required `!hasMore && images.every(decided)` before Apply
+would run at all, because the only mechanism it had — the toolbar's whole-directory
+`applyLibrarySelection` (`POST /api/library/apply`, reads the folder fresh and trashes
+*everything not selected*) — would otherwise trash every image past wherever review stopped,
+D90's mobile bug in a new shape. New `library_toolbar.dart::applyReviewDecisions` replaces that
+call with D90's own explicit-pair primitives instead: kept images move via
+`POST /api/library/move` (a no-op when the folder's configured target is itself — nothing to
+move, the image stays where it is) and discarded images delete via the existing
+`POST /api/library/delete`. Neither call can ever name an image the reviewer hasn't explicitly
+decided, so `canApply` is now just `_decisions.isNotEmpty` — no `hasMore` gate needed, since
+there's no "everything else" left to accidentally sweep up. A decided-and-kept image whose
+target is identity (stays in the same folder) keeps its green mark in local state after Apply,
+since nothing actually happened to it on disk; a moved or deleted image's decision is dropped,
+since re-opening the same folder later won't show it again anyway. Apply **no longer
+auto-closes review mode** on success — the old behavior assumed finishing meant the whole
+folder was done; a partial apply is now the expected, common case, and closing on every chunk
+would eject the reviewer mid-session. New `MoveResult`
+(`core/library_models.dart`) and `LibraryImagesController.move()` mirror the existing
+`ApplyResult`/`apply()` shape.
+
+**Finding #3 fixed — review mode is confined to the Library page's own content area.**
+D115 built review mode as `Navigator.push(fullscreenDialog: true)` on the *root* navigator,
+covering the title bar and nav rail entirely, matching SCREENS.md §5b's mockup at the time. The
+user now wants the nav rail reachable while reviewing — re-architected as a plain
+`libraryReviewingProvider` bool (`library_controller.dart`) that `LibraryPage.build()` checks:
+when true, it renders `LibraryReviewPage` directly in place of its normal three-pane
+folder/entity/grid view (keyed on `folder`/`entity` so re-triggering the nav rail's Review
+entry mid-session for a different backlog always starts with fresh decisions rather than
+Flutter reusing the previous review's `State`), leaving `AppShell`'s title bar and nav rail
+untouched as siblings above/beside it. `openReviewMode` (every entry point: the toolbar's
+Review button, the `R` shortcut, the nav rail, Flows' ⚑ edges, the command palette) is now
+synchronous and context-free — it sets folder/entity/nav-index and flips the flag, nothing to
+await. `LibraryReviewPage`'s own Esc/close-button/Apply-completion handlers, which used to call
+`Navigator.of(context).pop()`, now call the same flag off instead — popping the app's *root*
+Navigator (there is no longer a pushed route to pop) would have hit "cannot pop the last
+route." The double-click lightbox (`LibraryLightboxPage`, SCREENS.md §5c) is untouched — a
+different, browse-only feature not in this checkpoint's scope, still a real pushed route.
+
+**Verified.** `flutter analyze` clean, `flutter test` 226 total / 225 passing (`review_mode_test.dart`
+rewritten for the embedded harness and the new partial-apply behavior — a `Consumer` watching
+`libraryReviewingProvider` stands in for `LibraryPage`'s real swap, the same way the old suite
+stood in for a pushed route; `flows_layout_test.dart`'s ⚑-edge test updated to assert the
+provider state directly rather than a rendered "REVIEW" string, since tapping the edge no
+longer renders anything in that test's bare `PipelineEdge`-only tree; the one failure is
+D114's same pre-existing, unrelated `shell_layout_test.dart` issue, reconfirmed via `git stash`
+on the branch tip before writing any code here). `flutter build windows --debug` succeeds.
+Built and started for you per rule 5.
+
+**Same-session fix, found by your immediate live retest: every review-mode keyboard shortcut
+was dead on arrival.** Root cause was the embedding change itself (finding #3 above), not the
+keyboard map — `LibraryReviewPage`'s `Focus(autofocus: true)` reliably won focus back when D115
+pushed it as its own `Navigator` route, because pushing a route is one of the few places
+Flutter *actively* moves focus to the new content; `autofocus` on its own only claims focus
+when the enclosing scope has no focused child *at all*, and once this widget is instead just
+swapped in in place of `LibraryPage`'s content, whatever was focused at the moment "Review" was
+clicked (a toolbar button, a nav rail tile) was still the scope's recorded focused child when
+the new widget mounted, so autofocus silently did nothing and every key event had nowhere
+useful to go. `library_grid.dart` already carries the same lesson in its own code — it never
+trusts autofocus either, requiring an explicit per-tile `onRequestFocus: _focusNode.requestFocus`
+tap before its own keyboard shortcuts work. Fixed by having `_LibraryReviewPageState.initState()`
+explicitly call `_focusNode.requestFocus()` in a post-frame callback (after the node is actually
+attached), rather than relying on `autofocus` alone. `flutter analyze` clean,
+`flutter test test/review_mode_test.dart` 6/6 (unchanged by this fix — the widget-test harness's
+`tester.sendKeyEvent` didn't reproduce the bug, so this was only caught by your real, running
+app). Rebuilt and restarted for you. **Still awaiting your full checkpoint test.**
+
+---
+
 ## 2026-08-10 — V2.13.1 (Device identity) built, agent-side + app-side, awaiting your checkpoint test (D122)
 
 ### D122 · Cached serial→model map + a pinned-serial override, both agent-side; a new Settings device-pin card on top

@@ -315,8 +315,43 @@
 > afterward). Built and started for you per rule 5. **Not yet checkpoint-tested live** — the
 > phone is still disconnected (D116), so real model caching can't be exercised against a real
 > device this session; the pin/dropdown mechanics are still checkable from the app. Full
-> account in DECISIONS.md's D122. **Next up: V2.13.2**, one checkpoint per session per
-> PLAN_V2's own guidance.
+> account in DECISIONS.md's D122.
+>
+> **V2.13.2 (Library review mode refinements) built, app-only, awaiting your checkpoint test,
+> D123.** All three PLAN_V2.md findings fixed. The nav rail's Review entry
+> (`openReviewModeForFirstBacklog`) now walks the real YOUR REVIEW stage order
+> (`gender_invalid → gender_valid → scraped`, `libraryStageGroups`' own review group) and lands
+> on the first folder with a nonzero backlog, instead of unconditionally opening
+> `curationFolders.first` — which could never reach `gender_invalid`, since that list is
+> deliberately narrowed to `['gender_valid', 'scraped']` for Overview's own surfaces (D115) and
+> stays that way, untouched, everywhere else (hero tile, curation tile's badge/button, the
+> command palette's two explicit per-folder commands). Apply no longer requires every loaded
+> image decided first: new `applyReviewDecisions` (`library_toolbar.dart`) replaces the
+> whole-directory `POST /api/library/apply` with D90's own explicit-pair primitives — kept
+> images move via `POST /api/library/move` (a no-op when the target is the source folder),
+> discarded images delete via the existing `POST /api/library/delete` — so `canApply` is just
+> "something's been decided," and a large folder can be worked in chunks across sessions;
+> Apply no longer auto-closes review mode, since a partial batch is now the normal case, not a
+> finished-folder signal. Review mode itself is no longer a full-screen route: a plain
+> `libraryReviewingProvider` flag swaps it in in place of `LibraryPage`'s normal three-pane view
+> instead of covering the title bar and nav rail (D115's original call, now reversed for the
+> nav rail specifically, per the plan's own scoping) — every entry point (`openReviewMode`) is
+> now synchronous and context-free, and Esc/close/Apply flip the flag instead of popping a
+> Navigator. `flutter analyze` clean, `flutter test` 226/226 minus D114's same pre-existing
+> `shell_layout_test.dart` failure (reconfirmed via `git stash` before writing any code).
+> `flutter build windows --debug` succeeds. Built and started for you per rule 5.
+>
+> **Same-session fix, from your immediate live retest: every review-mode keyboard shortcut was
+> dead.** The embedding change above is the cause — `LibraryReviewPage`'s `autofocus: true` only
+> reliably worked when D115 pushed it as its own `Navigator` route (pushing a route is one of
+> the few places Flutter actively moves focus to the new content); embedded in place of
+> `LibraryPage`'s content instead, whatever was focused when "Review" was clicked (a toolbar
+> button, a nav rail tile) stayed the scope's focused child, so autofocus silently did nothing.
+> `library_grid.dart` already never trusts autofocus for this exact reason, requiring an
+> explicit per-tile `onRequestFocus` tap. Fixed the same way: `_LibraryReviewPageState.initState()`
+> now explicitly calls `_focusNode.requestFocus()` in a post-frame callback. Rebuilt and
+> restarted for you. Full account in DECISIONS.md's D123. **Still awaiting your full checkpoint
+> test — next up after that: V2.13.3**, one checkpoint per session per PLAN_V2's own guidance.
 >
 > **Scope boundary: v2 is entirely inside `app/`.** No agent, pipeline, helm or mobile
 > changes; no redeploys; no cross-repo branches. Every piece of data the redesign needs is

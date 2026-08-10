@@ -373,12 +373,15 @@ void main() {
 
     expect(container.read(selectedFolderProvider), 'gender_valid');
     // V2.10 — `openReviewModeForFolder` now also picks the folder's first
-    // entity with a real backlog and pushes straight into review mode,
-    // delivering on this comment's own long-standing promise (D108) instead
-    // of just landing on the Library screen with nothing picked.
+    // entity with a real backlog and switches review mode on, delivering on
+    // this comment's own long-standing promise (D108) instead of just
+    // landing on the Library screen with nothing picked. V2.13.2/D121 turned
+    // that "on" into a plain flag (`libraryReviewingProvider`) rather than a
+    // pushed route — `LibraryPage` is what actually renders review mode now,
+    // not this bare-`PipelineEdge` tree, so this only asserts the state.
     expect(container.read(selectedEntityProvider), 'someone');
     expect(container.read(selectedNavIndexProvider), libraryIndex);
-    expect(find.textContaining('REVIEW'), findsWidgets);
+    expect(container.read(libraryReviewingProvider), isTrue);
   });
 
   testWidgets('PipelineEdge turns warn when the backlog exceeds the reserve target', (tester) async {

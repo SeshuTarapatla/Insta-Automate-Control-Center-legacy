@@ -13,7 +13,6 @@ import '../core/service_models.dart';
 import '../core/theme/tokens.dart';
 import '../features/library/library_controller.dart';
 import '../features/library/review_page.dart';
-import '../features/overview/curation_tile.dart';
 import '../features/services/services_controller.dart';
 import '../ui/icons.dart';
 import '../ui/overlays.dart';
@@ -75,7 +74,14 @@ class AppNavRail extends ConsumerWidget {
         .length;
 
     final folders = ref.watch(libraryFoldersControllerProvider).value ?? const <LibraryFolderInfo>[];
-    final reviewCount = curationFolders.fold<int>(
+    // The nav rail's own Review entry point, unlike Overview's `curationFolders`
+    // (deliberately narrowed to `['gender_valid', 'scraped']` per D115 — a
+    // different surface, left untouched), needs the real YOUR REVIEW stage
+    // order so it can land on `gender_invalid` too (V2.13.2/D121) —
+    // `libraryStageGroups`' own review group is that order's one source of
+    // truth.
+    final reviewFolders = libraryStageGroups.firstWhere((g) => g.review).folders;
+    final reviewCount = reviewFolders.fold<int>(
       0,
       (sum, folder) => sum + (folders.where((f) => f.name == folder).map((f) => f.total).firstOrNull ?? 0),
     );
@@ -89,9 +95,11 @@ class AppNavRail extends ConsumerWidget {
 
     void select(int index) => ref.read(selectedNavIndexProvider.notifier).select(index);
     // V2.10 — delivers on this tile's own promise for real: jumps straight
-    // into review mode for the first curation folder with a real backlog,
-    // not just to the Library screen with nothing picked.
-    void openReview() => openReviewModeForFolder(context, ref, curationFolders.first);
+    // into review mode for whichever YOUR REVIEW folder has a real backlog
+    // first, in real stage-priority order (V2.13.2/D121 — was
+    // `curationFolders.first`, which could never land on `gender_invalid`
+    // since that list deliberately excludes it for Overview's own reasons).
+    void openReview() => openReviewModeForFirstBacklog(context, ref, reviewFolders);
 
     return AnimatedContainer(
       duration: tokens.motion.reduced ? Duration.zero : tokens.motion.standard,
@@ -118,7 +126,7 @@ class AppNavRail extends ConsumerWidget {
                       _NavTile(
                         icon: AppIcons.review,
                         label: 'Review',
-                        selected: selected == libraryIndex && curationFolders.contains(selectedFolder),
+                        selected: selected == libraryIndex && reviewFolders.contains(selectedFolder),
                         collapsed: collapsed,
                         badgeCount: reviewCount,
                         indent: true,

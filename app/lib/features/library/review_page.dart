@@ -1,12 +1,16 @@
 // SCREENS.md §5b — Library review mode, the headline feature of v2. A
-// full-window route (pushed via the root Navigator, covering the title bar
-// and nav rail the same way the ASCII mockup shows no app chrome at all)
-// over a keep/discard decision buffer for one `(folder, entity)` at a time.
+// keep/discard decision buffer for one `(folder, entity)` at a time,
+// confined to the Library page's own content area (V2.13.2/D121 — D115's
+// original full-screen route covering the title bar and nav rail entirely
+// was reversed so the nav rail stays reachable while reviewing;
+// `library_page.dart` swaps this in in place of its normal three-pane view
+// whenever `libraryReviewingProvider` is on).
 //
-// Nothing is written until Apply, which reuses `applyLibrarySelection` —
-// the exact same `POST /api/library/apply` call and confirm dialog the
-// grid's own toolbar button already uses. `Del` is the one exception: a
-// real, immediate delete via the shared `deleteLibrarySelection`, same as
+// Nothing is written until Apply, which reuses `applyReviewDecisions` — the
+// same confirm-then-report shape `applyLibrarySelection`/`deleteLibrarySelection`
+// already established, just scoped to only the images actually decided so
+// far rather than the whole directory (V2.13.2). `Del` is the one exception:
+// a real, immediate delete via the shared `deleteLibrarySelection`, same as
 // every other delete path in this app.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,10 +28,15 @@ import '../../ui/text.dart';
 import 'library_controller.dart';
 import 'library_toolbar.dart';
 
-Future<void> openReviewMode(BuildContext context, WidgetRef ref, {required String folder, String? entity}) {
-  return Navigator.of(context, rootNavigator: true).push(
-    MaterialPageRoute(fullscreenDialog: true, builder: (_) => LibraryReviewPage(folder: folder, entity: entity)),
-  );
+/// Selects [folder]/[entity] and switches review mode on. Synchronous and
+/// context-free — every call site (the toolbar's Review button, the `R`
+/// shortcut, the nav rail, Flows' ⚑ edges, the command palette) just needs
+/// the state changed, not a route pushed.
+void openReviewMode(WidgetRef ref, {required String folder, String? entity}) {
+  ref.read(selectedFolderProvider.notifier).select(folder);
+  ref.read(selectedEntityProvider.notifier).select(entity);
+  ref.read(selectedNavIndexProvider.notifier).select(libraryIndex);
+  ref.read(libraryReviewingProvider.notifier).start();
 }
 
 Future<void> openLightbox(
@@ -67,7 +76,26 @@ Future<void> openReviewModeForFolder(BuildContext context, WidgetRef ref, String
     ref.read(selectedEntityProvider.notifier).select(entity);
   }
   if (!context.mounted) return;
-  await openReviewMode(context, ref, folder: folder, entity: entity);
+  openReviewMode(ref, folder: folder, entity: entity);
+}
+
+/// The nav rail's Review entry needs to land on whichever folder in
+/// [folderPriority] actually has a backlog, not just the first one
+/// regardless of count — [openReviewModeForFolder] already picks the right
+/// *entity* within a chosen folder; this picks the right *folder* first
+/// (V2.13.2/D121: the old `curationFolders.first` could never land on
+/// `gender_invalid` even though it's first in the real review-stage order,
+/// since that list deliberately excludes it for a different reason — see
+/// D115's own narrowing, which stays untouched for Overview's surfaces).
+Future<void> openReviewModeForFirstBacklog(BuildContext context, WidgetRef ref, List<String> folderPriority) async {
+  final folders = await ref.read(libraryFoldersControllerProvider.future);
+  for (final name in folderPriority) {
+    final info = folders.where((f) => f.name == name).firstOrNull;
+    if (info == null || info.total == 0) continue;
+    if (!context.mounted) return;
+    await openReviewModeForFolder(context, ref, name);
+    return;
+  }
 }
 
 String _idFromName(String name) => name.endsWith('.jpg') ? name.substring(0, name.length - 4) : name;
@@ -87,6 +115,24 @@ class _LibraryReviewPageState extends ConsumerState<LibraryReviewPage> {
   int _position = 0;
   bool _zoomFit = true;
   final _focusNode = FocusNode(debugLabel: 'LibraryReviewPage');
+
+  @override
+  void initState() {
+    super.initState();
+    // `autofocus` only claims focus when the enclosing scope has no focused
+    // child at all — reliable back when D115 pushed this as its own route
+    // (`Navigator` explicitly moves focus to a newly pushed route on top of
+    // whatever held it before), not now that V2.13.2/D121 embeds this widget
+    // in place of `LibraryPage`'s own content: whatever was focused when
+    // "Review" was clicked (a toolbar button, a nav rail tile) can still be
+    // the scope's recorded focused child once this mounts, silently
+    // stranding every keyboard shortcut with nothing to receive them.
+    // Requesting focus explicitly, after the first frame so the node is
+    // actually attached, is the fix.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
 
   @override
   void dispose() {
@@ -147,10 +193,51 @@ class _LibraryReviewPageState extends ConsumerState<LibraryReviewPage> {
     }
   }
 
-  Future<void> _apply(String target) async {
-    final selected = _decisions.entries.where((e) => e.value).map((e) => e.key).toSet();
-    final applied = await applyLibrarySelection(context, ref, folder: widget.folder, selected: selected, target: target);
-    if (applied && mounted) Navigator.of(context).pop();
+  void _exit() => ref.read(libraryReviewingProvider.notifier).stop();
+
+  /// Applies only what's actually been decided (V2.13.2/D121) — keep goes
+  /// through `move()` when the target differs from the source folder (a
+  /// no-op when it doesn't: an identity target just means "leave it here"),
+  /// discard goes through `delete()`. Undecided images are never touched, so
+  /// review mode never auto-closes on its own the way a whole-folder Apply
+  /// used to: there's no "finished" state to detect when a batch can be
+  /// applied in chunks.
+  Future<void> _apply(String target, List<LibraryImageEntry> images) async {
+    final byName = {for (final e in images) e.name: e};
+    final keep = _decisions.entries
+        .where((e) => e.value)
+        .map((e) => byName[e.key])
+        .whereType<LibraryImageEntry>()
+        .toList();
+    final discard = _decisions.entries
+        .where((e) => !e.value)
+        .map((e) => byName[e.key])
+        .whereType<LibraryImageEntry>()
+        .toList();
+    final applied = await applyReviewDecisions(
+      context,
+      ref,
+      folder: widget.folder,
+      entity: widget.entity,
+      target: target,
+      keep: keep,
+      discard: discard,
+    );
+    if (!applied || !mounted) return;
+    setState(() {
+      for (final e in discard) {
+        _decisions.remove(e.name);
+      }
+      // A kept image only actually left the folder if it was moved
+      // somewhere else — an identity target leaves it in place, so its
+      // decision stays recorded rather than reverting to undecided.
+      if (target != widget.folder) {
+        for (final e in keep) {
+          _decisions.remove(e.name);
+        }
+      }
+      _position = 0;
+    });
   }
 
   KeyEventResult _handleKey(KeyEvent event, List<LibraryImageEntry> images, bool canApply, String target) {
@@ -169,7 +256,7 @@ class _LibraryReviewPageState extends ConsumerState<LibraryReviewPage> {
         _toggleCurrent(images);
       case LogicalKeyboardKey.enter:
       case LogicalKeyboardKey.numpadEnter:
-        if (canApply) _apply(target);
+        if (canApply) _apply(target, images);
       case LogicalKeyboardKey.delete:
         _deleteCurrent(images);
       case LogicalKeyboardKey.keyZ:
@@ -177,7 +264,7 @@ class _LibraryReviewPageState extends ConsumerState<LibraryReviewPage> {
       case LogicalKeyboardKey.keyO:
         _openInstagram(images);
       case LogicalKeyboardKey.escape:
-        Navigator.of(context).pop();
+        _exit();
       default:
         return KeyEventResult.ignored;
     }
@@ -201,12 +288,12 @@ class _LibraryReviewPageState extends ConsumerState<LibraryReviewPage> {
             _maybePageMore(state);
             final images = state.images;
             final position = _position.clamp(0, images.length);
-            // The whole loaded set must be decided, with nothing left to
-            // page in, before Apply is allowed — otherwise Apply's own
-            // `POST /api/library/apply` (whole-directory scoped) would trash
-            // every image past whatever's been decided so far. Same class of
-            // bug D90 caught on mobile.
-            final canApply = !state.hasMore && images.isNotEmpty && images.every((e) => _decisions.containsKey(e.name));
+            // Apply now runs on whatever's actually been decided (V2.13.2) —
+            // it no longer needs the whole loaded set decided, or every page
+            // paged in, first: `applyReviewDecisions` only ever touches the
+            // named keep/discard images, so an undecided or not-yet-loaded
+            // image is never at risk the way a whole-directory apply() was.
+            final canApply = _decisions.isNotEmpty;
             final keepCount = _decisions.values.where((v) => v).length;
             final discardCount = _decisions.values.where((v) => !v).length;
 
@@ -221,7 +308,7 @@ class _LibraryReviewPageState extends ConsumerState<LibraryReviewPage> {
                     entity: widget.entity,
                     position: position,
                     total: state.total,
-                    onClose: () => Navigator.of(context).pop(),
+                    onClose: _exit,
                   ),
                   Expanded(
                     child: images.isEmpty
@@ -255,7 +342,7 @@ class _LibraryReviewPageState extends ConsumerState<LibraryReviewPage> {
                       discard: discardCount,
                       canApply: canApply,
                       onJump: (i) => setState(() => _position = i),
-                      onApply: () => _apply(target),
+                      onApply: () => _apply(target, images),
                     ),
                 ],
               ),

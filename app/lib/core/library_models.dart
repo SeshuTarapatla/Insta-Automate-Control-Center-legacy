@@ -145,3 +145,21 @@ class DeleteResult {
     errors: (json['errors'] as List).cast<String>(),
   );
 }
+
+/// Result of `POST /api/library/move` — explicit `{from, to}` pairs (D90),
+/// reused by review mode's partial Apply (V2.13.2) since it, like mobile's
+/// paginated apply before it, can only ever see part of a folder and must
+/// never touch anything it wasn't explicitly told to move.
+class MoveResult {
+  const MoveResult({required this.moved, required this.alreadySynced, required this.errors});
+
+  final List<String> moved;
+  final List<String> alreadySynced;
+  final List<String> errors;
+
+  factory MoveResult.fromJson(Map<String, dynamic> json) => MoveResult(
+    moved: (json['moved'] as List).cast<String>(),
+    alreadySynced: (json['already_synced'] as List).cast<String>(),
+    errors: (json['errors'] as List).cast<String>(),
+  );
+}

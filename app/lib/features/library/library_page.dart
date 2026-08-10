@@ -25,6 +25,7 @@ class LibraryPage extends ConsumerWidget {
     final foldersAsync = ref.watch(libraryFoldersControllerProvider);
     final selectedFolder = ref.watch(selectedFolderProvider);
     final selectedEntity = ref.watch(selectedEntityProvider);
+    final reviewing = ref.watch(libraryReviewingProvider);
 
     // Page-level guard only for the states `.value` can't paper over — once
     // a first list has ever loaded, a slow/erroring re-fetch keeps showing
@@ -40,6 +41,19 @@ class LibraryPage extends ConsumerWidget {
     }
 
     final flat = foldersAsync.value?.where((f) => f.name == selectedFolder).firstOrNull?.flat ?? true;
+
+    // V2.13.2/D121 — review mode replaces this page's own content in place
+    // instead of D115's full-screen route over everything, so the title bar
+    // and nav rail (`shell/app_shell.dart`, siblings of `LibraryPage` itself)
+    // stay visible and reachable while reviewing. Keyed on folder/entity so
+    // switching which backlog is being reviewed (the nav rail's Review entry
+    // can be clicked again mid-session) always starts with fresh decisions
+    // rather than Flutter reusing the previous review's `State`.
+    if (reviewing && selectedFolder != null) {
+      final reviewEntity = flat ? null : selectedEntity;
+      return LibraryReviewPage(key: ValueKey('review-$selectedFolder-$reviewEntity'), folder: selectedFolder, entity: reviewEntity);
+    }
+
     final showGrid = selectedFolder != null && (flat || selectedEntity != null);
 
     final gridArea = AppPanel(
@@ -95,7 +109,7 @@ class LibraryPage extends ConsumerWidget {
         const SingleActivator(LogicalKeyboardKey.keyR): () {
           final images = ref.read(libraryImagesControllerProvider).value;
           if (selectedFolder == null || images == null || images.total == 0) return;
-          openReviewMode(context, ref, folder: selectedFolder, entity: flat ? null : selectedEntity);
+          openReviewMode(ref, folder: selectedFolder, entity: flat ? null : selectedEntity);
         },
       },
       child: Focus(

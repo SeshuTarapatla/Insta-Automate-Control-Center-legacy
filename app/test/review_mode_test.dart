@@ -10,12 +10,17 @@ import 'package:ia_control_center/core/library_models.dart';
 import 'package:ia_control_center/features/library/library_controller.dart';
 import 'package:ia_control_center/features/library/review_page.dart';
 
-/// `review_page.dart`'s own keyboard map (SCREENS.md §5b) and the "nothing
-/// written until Apply" / "never present a partial set as the whole folder"
-/// rules D90 already caught on mobile. `FileOpener.openUrl` (the `O` key) is
-/// deliberately never exercised here — it shells out to the real OS via
-/// win32 `ShellExecute`, same reasoning `library_layout_test.dart` already
-/// follows for the tile's own "Open on Instagram" menu item.
+/// `review_page.dart`'s own keyboard map (SCREENS.md §5b) and V2.13.2/D121's
+/// partial-Apply rules: Apply now runs on whatever's actually been decided
+/// (no longer gated on every loaded image being decided, or on `hasMore`
+/// being false first — that whole-directory-safety concern belonged to the
+/// old `POST /api/library/apply` call, which this Apply no longer makes),
+/// and review mode is embedded (`libraryReviewingProvider`), not a pushed
+/// route, so Esc/close/Apply toggle that flag instead of popping a
+/// Navigator. `FileOpener.openUrl` (the `O` key) is deliberately never
+/// exercised here — it shells out to the real OS via win32 `ShellExecute`,
+/// same reasoning `library_layout_test.dart` already follows for the tile's
+/// own "Open on Instagram" menu item.
 final _tinyPng = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
 );
@@ -23,7 +28,7 @@ final _tinyPng = base64Decode(
 LibraryImageEntry _image(String name, {String folder = 'gender_valid', String entity = 'someone'}) =>
     LibraryImageEntry(name: name, path: '$folder/$entity/$name');
 
-/// Records every mutating call instead of hitting a real agent — `apply()`/
+/// Records every mutating call instead of hitting a real agent — `move()`/
 /// `delete()`/`loadMore()` are all overridden directly (not just `build()`,
 /// unlike `library_layout_test.dart`'s fakes), since this suite's whole point
 /// is verifying those calls do or don't happen.
@@ -32,7 +37,7 @@ class _RecordingImagesController extends LibraryImagesController {
   final LibraryImagesState _initial;
 
   int loadMoreCalls = 0;
-  List<String>? appliedSelected;
+  List<Map<String, String>>? movedPairs;
   List<String>? deletedPaths;
 
   @override
@@ -48,9 +53,9 @@ class _RecordingImagesController extends LibraryImagesController {
   }
 
   @override
-  Future<ApplyResult> apply(List<String> selected) async {
-    appliedSelected = selected;
-    return ApplyResult(target: 'gender_valid', moved: selected, trashed: const [], errors: const []);
+  Future<MoveResult> move(List<Map<String, String>> moves) async {
+    movedPairs = moves;
+    return MoveResult(moved: moves.map((m) => m['to']!).toList(), alreadySynced: const [], errors: const []);
   }
 
   @override
@@ -61,13 +66,25 @@ class _RecordingImagesController extends LibraryImagesController {
 }
 
 class _FakeMoveTargetsController extends MoveTargetsController {
+  _FakeMoveTargetsController(this._targets);
+  final Map<String, String> _targets;
+
   @override
-  Future<Map<String, String>> build() async => const {};
+  Future<Map<String, String>> build() async => _targets;
 }
 
-/// Always pushes the review page on top of a placeholder home route (never
-/// sets it as `home:` directly) — Escape and a successful Apply both call
-/// `Navigator.pop()`, which needs somewhere real to land.
+class _FakeFoldersController extends LibraryFoldersController {
+  _FakeFoldersController(this._folders);
+  final List<LibraryFolderInfo> _folders;
+
+  @override
+  Future<List<LibraryFolderInfo>> build() async => _folders;
+}
+
+/// Mirrors how `library_page.dart` actually swaps review mode in — a plain
+/// `libraryReviewingProvider` flag, not a pushed route (V2.13.2/D121), so
+/// Esc/close/a successful Apply all just flip that flag rather than popping
+/// a Navigator.
 Future<_RecordingImagesController> _pump(
   WidgetTester tester, {
   required List<LibraryImageEntry> images,
@@ -75,6 +92,8 @@ Future<_RecordingImagesController> _pump(
   bool hasMore = false,
   String folder = 'gender_valid',
   String? entity = 'someone',
+  Map<String, String> moveTargets = const {},
+  List<LibraryFolderInfo> folders = const [],
 }) async {
   final controller = _RecordingImagesController(
     LibraryImagesState(images: images, total: total, hasMore: hasMore, loadingMore: false),
@@ -84,22 +103,27 @@ Future<_RecordingImagesController> _pump(
     ProviderScope(
       overrides: [
         libraryImagesControllerProvider.overrideWith(() => controller),
-        moveTargetsControllerProvider.overrideWith(_FakeMoveTargetsController.new),
+        moveTargetsControllerProvider.overrideWith(() => _FakeMoveTargetsController(moveTargets)),
+        libraryFoldersControllerProvider.overrideWith(() => _FakeFoldersController(folders)),
         libraryImageBytesProvider.overrideWith((ref, path) async => _tinyPng),
       ],
       child: MaterialApp(
         theme: ThemeData(useMaterial3: true, brightness: Brightness.dark),
-        home: Builder(
-          builder: (context) => Scaffold(
-            body: Center(
-              child: ElevatedButton(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => LibraryReviewPage(folder: folder, entity: entity)),
+        home: Consumer(
+          builder: (context, ref, _) {
+            final reviewing = ref.watch(libraryReviewingProvider);
+            if (!reviewing) {
+              return Scaffold(
+                body: Center(
+                  child: ElevatedButton(
+                    onPressed: () => ref.read(libraryReviewingProvider.notifier).start(),
+                    child: const Text('open review'),
+                  ),
                 ),
-                child: const Text('open review'),
-              ),
-            ),
-          ),
+              );
+            }
+            return LibraryReviewPage(folder: folder, entity: entity);
+          },
         ),
       ),
     ),
@@ -116,7 +140,7 @@ Future<void> _press(WidgetTester tester, LogicalKeyboardKey key) async {
 
 void main() {
   testWidgets('Keep/Discard advance and record decisions; Up backs one and un-decides it', (tester) async {
-    final controller = await _pump(tester, images: [_image('a.jpg'), _image('b.jpg'), _image('c.jpg')], total: 3);
+    await _pump(tester, images: [_image('a.jpg'), _image('b.jpg'), _image('c.jpg')], total: 3);
 
     await _press(tester, LogicalKeyboardKey.arrowRight); // keep a -> position 1
     await _press(tester, LogicalKeyboardKey.arrowLeft); // discard b -> position 2
@@ -129,35 +153,61 @@ void main() {
     await _press(tester, LogicalKeyboardKey.arrowRight); // keep c -> position 3 (past the end)
 
     expect(find.textContaining('All reviewed'), findsOneWidget);
+    expect(find.textContaining('3 keep'), findsOneWidget);
+  });
 
-    final applyButton = tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Apply batch   ⏎'));
-    expect(applyButton.onPressed, isNotNull, reason: 'every loaded image is decided and nothing more to page in');
+  testWidgets('Apply is disabled until something is decided, then runs on just the decided images', (tester) async {
+    final images = [for (var i = 0; i < 5; i++) _image('img$i.jpg')];
+    // hasMore is deliberately true — V2.13.2 dropped the old "not while more
+    // pages remain" rule, since a partial Apply never risks a not-yet-loaded
+    // image the way the whole-directory `apply()` endpoint used to.
+    final controller = await _pump(tester, images: images, total: 12, hasMore: true);
+
+    final applyButton = find.widgetWithText(FilledButton, 'Apply batch   ⏎');
+    expect(tester.widget<FilledButton>(applyButton).onPressed, isNull, reason: 'nothing decided yet');
+
+    await _press(tester, LogicalKeyboardKey.arrowRight); // keep img0
+    await _press(tester, LogicalKeyboardKey.arrowLeft); // discard img1
+
+    expect(tester.widget<FilledButton>(applyButton).onPressed, isNotNull, reason: 'two images decided, even with hasMore true');
+
+    await tester.tap(applyButton);
+    await tester.pumpAndSettle();
+    expect(find.text('Apply decided images?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
+    await tester.pumpAndSettle();
+
+    // Identity target (no move-targets override) — kept stays put, so only
+    // the discard actually calls delete(); nothing was moved.
+    expect(controller.movedPairs, isNull);
+    expect(controller.deletedPaths, ['gender_valid/someone/img1.jpg']);
+    // Review mode does not auto-close on Apply anymore — a partial batch is
+    // the expected case, not a "finished" signal.
+    expect(find.byType(LibraryReviewPage), findsOneWidget);
+    expect(find.text('open review'), findsNothing);
+  });
+
+  testWidgets('Apply moves kept images when the target differs from the source folder', (tester) async {
+    final controller = await _pump(
+      tester,
+      images: [_image('a.jpg'), _image('b.jpg')],
+      total: 2,
+      moveTargets: {'gender_valid': 'scrape_queued'},
+      folders: [const LibraryFolderInfo(name: 'scrape_queued', flat: false, total: 0, entities: 0)],
+    );
+
+    await _press(tester, LogicalKeyboardKey.arrowRight); // keep a
+    await _press(tester, LogicalKeyboardKey.arrowLeft); // discard b
 
     await tester.tap(find.widgetWithText(FilledButton, 'Apply batch   ⏎'));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
     await tester.pumpAndSettle();
 
-    // The whole point of Up-then-redecide: b ends up kept, never left
-    // discarded from step 2's since-reversed decision.
-    expect(controller.appliedSelected, unorderedEquals(['a.jpg', 'b.jpg', 'c.jpg']));
-    // A successful Apply closes the route on its own.
-    expect(find.text('open review'), findsOneWidget);
-  });
-
-  testWidgets('Apply stays disabled while more pages remain, even if every loaded image is decided', (tester) async {
-    final images = [for (var i = 0; i < 5; i++) _image('img$i.jpg')];
-    await _pump(tester, images: images, total: 12, hasMore: true);
-
-    for (var i = 0; i < 5; i++) {
-      await _press(tester, LogicalKeyboardKey.arrowRight);
-    }
-
-    // Every *loaded* image is decided, but `hasMore` is still true — Apply
-    // must stay off, or it would trash every not-yet-loaded image the way
-    // D90 caught on mobile.
-    final applyButton = tester.widget<FilledButton>(find.widgetWithText(FilledButton, 'Apply batch   ⏎'));
-    expect(applyButton.onPressed, isNull);
+    expect(controller.movedPairs, [
+      {'from': 'gender_valid/someone/a.jpg', 'to': 'scrape_queued/someone/a.jpg'},
+    ]);
+    expect(controller.deletedPaths, ['gender_valid/someone/b.jpg']);
   });
 
   testWidgets('Pagination boundary: loadMore fires once the reader approaches the loaded edge, not before', (
@@ -182,8 +232,8 @@ void main() {
     await _press(tester, LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
 
-    expect(find.text('open review'), findsOneWidget, reason: 'Esc popped the review route');
-    expect(controller.appliedSelected, isNull, reason: 'nothing is written until Apply — Esc must not call it');
+    expect(find.text('open review'), findsOneWidget, reason: 'Esc turned libraryReviewingProvider back off');
+    expect(controller.movedPairs, isNull, reason: 'nothing is written until Apply — Esc must not call it');
     expect(controller.deletedPaths, isNull);
   });
 

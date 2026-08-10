@@ -12,6 +12,78 @@ import 'entity_yield_dialog.dart';
 import 'library_controller.dart';
 import 'review_page.dart';
 
+/// Review mode's own Apply (V2.13.2/D121) — unlike [applyLibrarySelection]'s
+/// whole-directory `POST /api/library/apply` (which reads the folder fresh
+/// and trashes everything *not* selected, so it can only run once every
+/// loaded image is decided), this only ever touches the images actually
+/// decided so far: [keep] moves via D90's explicit-pair `POST
+/// /api/library/move` (a no-op when [target] is the source folder — nothing
+/// to move, the image just stays put) and [discard] deletes via the
+/// explicit-path `POST /api/library/delete`. Undecided images are never
+/// named in either call, so a large folder can be worked in convenient
+/// chunks across sessions instead of needing to be finished in one sitting.
+/// Returns whether anything was actually applied.
+Future<bool> applyReviewDecisions(
+  BuildContext context,
+  WidgetRef ref, {
+  required String folder,
+  required String? entity,
+  required String target,
+  required List<LibraryImageEntry> keep,
+  required List<LibraryImageEntry> discard,
+}) async {
+  if (keep.isEmpty && discard.isEmpty) return false;
+  final movesNeeded = target != folder && keep.isNotEmpty;
+  if (movesNeeded) {
+    final targetFlat = ref.read(libraryFoldersControllerProvider).value?.where((f) => f.name == target).firstOrNull?.flat;
+    if (targetFlat == false && entity == null) {
+      AppSnackBar.show(context, '$target requires an entity', isError: true);
+      return false;
+    }
+  }
+
+  final parts = <String>[
+    if (keep.isNotEmpty)
+      movesNeeded ? 'Move ${keep.length} kept image(s) to "$target".' : 'Keep ${keep.length} image(s) here.',
+    if (discard.isNotEmpty) 'Send ${discard.length} discarded image(s) to the Recycle Bin.',
+    'Anything not yet decided is left untouched for later.',
+  ];
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Apply decided images?'),
+      content: Text(parts.join(' ')),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Apply')),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return false;
+
+  try {
+    if (movesNeeded) {
+      final targetFlat = ref.read(libraryFoldersControllerProvider).value?.where((f) => f.name == target).firstOrNull?.flat ?? true;
+      final moves = [
+        for (final entry in keep)
+          {'from': entry.path, 'to': targetFlat ? '$target/${entry.name}' : '$target/$entity/${entry.name}'},
+      ];
+      await ref.read(libraryImagesControllerProvider.notifier).move(moves);
+    }
+    if (discard.isNotEmpty) {
+      await ref.read(libraryImagesControllerProvider.notifier).delete(discard.map((e) => e.path).toList());
+    }
+    ref.read(librarySelectionProvider.notifier).clear();
+    if (context.mounted) {
+      AppSnackBar.show(context, 'Applied ${keep.length + discard.length} decided image(s) — the rest left for later.');
+    }
+    return true;
+  } on DioException catch (error) {
+    if (context.mounted) AppSnackBar.show(context, describeLibraryError(error), isError: true);
+    return false;
+  }
+}
+
 /// Shared by the toolbar's Delete button and the grid's Delete-key shortcut
 /// (`library_grid.dart`) so both paths confirm and report identically.
 Future<void> deleteLibrarySelection(BuildContext context, WidgetRef ref, List<LibraryImageEntry> selectedEntries) async {
@@ -201,7 +273,7 @@ class LibraryToolbar extends ConsumerWidget {
               OutlinedButton.icon(
                 onPressed: images == null || images.total == 0
                     ? null
-                    : () => openReviewMode(context, ref, folder: folder, entity: entity),
+                    : () => openReviewMode(ref, folder: folder, entity: entity),
                 icon: AppIcon(AppIcons.review, size: IconSize.sm),
                 label: const Text('Review'),
               ),

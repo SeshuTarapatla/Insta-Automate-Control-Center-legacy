@@ -250,7 +250,15 @@ class _CapsTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(burndownProvider);
-    final liveFlows = ref.watch(flowsControllerProvider).value?.flows;
+    // Only trust the heartbeat's `today` figures while the scheduler is
+    // actually reporting live (D121/V2.13.3) — once heartbeats stop (the
+    // pipeline pod stuck waiting on a disconnected device never even starts
+    // its heartbeat loop, `Insta-Automate/controllers/prefect.py::serve()`),
+    // `flows` keeps whatever it last held, silently frozen on a prior day.
+    // `online` (a 15s heartbeat watchdog, agent-side) is the one signal that
+    // tells the two apart.
+    final snapshot = ref.watch(flowsControllerProvider).value;
+    final liveFlows = snapshot != null && snapshot.online ? snapshot.flows : null;
     return _Tile(
       title: "Today's caps",
       navIndex: insightsIndex,

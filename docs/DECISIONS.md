@@ -5,6 +5,90 @@ session can tell a settled question from an open one.
 
 ---
 
+## 2026-08-10 — V2.13.3 (Dashboard & shell fixes) built, app-only, awaiting your checkpoint test (D124)
+
+### D124 · Caps tile stops trusting a frozen heartbeat; nav rail toggle's whole row is now the hit target; StatusChip bumped and made ellipsis-safe; "This machine" → "Host"
+
+**Finding #1 — the frozen caps tile, root-caused rather than guessed.** PLAN_V2.md flagged two
+hypotheses and asked to start with the scheduler's day-counter/heartbeat logic. Read directly:
+`Insta-Automate/models/scan.py`/`scrape.py`/`follow.py`'s `.fetch(session)` always queries by
+`Timestamp().date()` (today), returning a fresh zero-valued row when none exists yet — so
+`controllers/prefect.py::_today()` is *not* lazily gated on a flow's first trigger of the day;
+hypothesis (a) as originally stated doesn't hold while the scheduler pod is actually heartbeating.
+The real gap is earlier in the same file: `heartbeat_loop()` is only ever started from inside
+`serve()`, *after* `await wait_for_device(self.tl)` resolves — with the phone disconnected
+indefinitely (D116), that await never returns, so the heartbeat loop never starts at all, and the
+agent's `SchedulerMirror._flows` (`agent/src/ia_agent/scheduler.py`) keeps whatever it last held
+(a prior day's real numbers) forever. `online()` does flip to `false` after `STALE_AFTER` (15s),
+but nothing on the app side was reading that flag before trusting `flows`. Fixing the actual root
+cause (decoupling the heartbeat loop from device connection) is a pipeline change, out of scope
+per the standing v2 `app/`-only boundary — no exception was raised for it here. Fixed app-side,
+defensively and correctly for both hypotheses at once: `overview_page.dart`'s `_CapsTile` now
+passes `liveFlows` only when `SchedulerSnapshot.online` is true (a stopped heartbeat no longer
+masquerades as current data), and `caps_tile.dart`'s burndown fallback now checks the fetched
+snapshot's last day against the actual wall-clock date (`_todayKey()`) before treating it as
+"today" — a genuinely new day with no live data reads as 0, not as whichever day the once-per-
+session snapshot happened to end on. New `test/caps_tile_test.dart` (3 checks, `CapsTile` tested
+in isolation) — the "falls back to 0" case was confirmed to actually fail against the pre-fix
+`_CapBar` (asserted `5/300` where the fix now shows `0/300`) before being trusted.
+
+**Finding #2 — the nav rail collapse toggle's whole row is now the hit target.**
+`shell/nav_rail.dart`'s `_CollapseToggle` was a small `IconButton` that relocates when the rail
+expands/collapses, so every click after the first needed the cursor to chase it. Rebuilt as an
+`InkWell` wrapping the full-width row (matching `_NavTile`'s own tappable-row shape above it),
+with the icon still visually anchored where it was (right-aligned when expanded, centered when
+collapsed) via `Align` rather than driving the hit area. New `shell_layout_test.dart` case taps
+the row's far-left edge — deliberately away from the icon — and confirms it still toggles;
+confirmed failing against the pre-fix `IconButton`-only version first.
+
+**Finding #3 — `StatusChip` bumped, and made to degrade instead of overflow.** `ui/status.dart`'s
+`StatusChip` moved from `labelSmall` (10.5px) to `labelMedium` (12px) with proportionally larger
+padding — one shared-component change (COMPONENTS.md's established pattern, V2.2/V2.7/V2.9), so
+Live's counters and the Dependencies table both read larger without a per-call-site tweak.
+`run_summary.dart`'s private `_CounterChip` (mirrors `StatusChip`'s shape locally rather than
+widening the shared one, since every other call site wants a plain label and this one wants an
+`AnimatedCounter`) was bumped to match — its label word had been `labelSmall` even though the
+count beside it already rendered at `labelMedium`, an internal size mismatch on top of the same
+complaint. **A real regression surfaced immediately by the existing test suite, not found live**:
+`service_tile.dart`'s origin badge ("external"/"adopted", already documented in its own comment as
+tightly fit at the 300px card floor) started overflowing by 8.7px under the larger chip. Root
+cause: `StatusChip`'s `Text` had no `overflow`/`maxLines` at all, so a `Flexible` ancestor had
+nothing to shrink — and a single unbreakable word like "adopted" can't wrap to satisfy a tighter
+allocation, so Flutter reports a hard `RenderFlex` overflow instead of a soft truncation. Fixed at
+the shared component (`maxLines: 1, overflow: TextOverflow.ellipsis`, wrapped in an internal
+`Flexible`) rather than special-cased in `service_tile.dart` — any other tightly-fit call site is
+covered the same way now. New `test/ui/status_test.dart` case (a `StatusChip` forced into a 40px
+`Flexible`) confirmed failing with the exact overflow before the fix, passing after.
+
+**Finding #4 — one-line rename.** `core/dependency_models.dart:39`'s `DependencyGroup.host.label`:
+`'This machine'` → `'Host'`.
+
+**Verified:** `flutter analyze` clean. `flutter test` 232 total / 231 passing — the one
+`shell_layout_test.dart` failure (`AppShell … rail expanded`, an icon-size assertion unrelated to
+anything touched this session) reconfirmed pre-existing via `git stash` on the exact same assertion
+and message, matching D114's original finding. `flutter build windows --debug` succeeds. Built,
+stale prior instance killed, and started fresh for you per rule 5.
+
+**Same-session fix, from your immediate live retest: the toggle's icon wasn't actually centered in
+either state.** The expanded case was deliberately right-aligned by design (`Alignment.centerRight`
++ an 8px right `Padding`) to keep the icon where it visually sat before this checkpoint — but that
+same right padding stayed on in the collapsed case too, where the alignment *was* `Alignment.center`,
+so the padded box (icon + 8px of empty space on its right) is what got centered, leaving the icon
+itself sitting ~4px left of true center. Fixed by dropping the right-alignment scheme entirely —
+the icon is now plainly `Center`ed with no extra padding, correct in both states, matching what you
+actually asked for ("properly aligned to the center in both cases") rather than the original
+"keep it where it visually was when expanded" read. `flutter analyze` clean, `flutter test`
+unchanged (the row-wide tap test doesn't assert icon position, only that the row responds).
+Rebuilt, prior instance killed, restarted fresh for you.
+
+**Not yet checkpoint-tested live** — this session's own defensive fix for Finding #1 can't be
+exercised against a real day rollover with the phone still disconnected (D116); the checkpoint
+test itself (PLAN_V2.md's own "stop every flow, let a day roll over (or simulate it)") is still
+yours to run, alongside a plain look at the nav rail toggle, Live/Dependencies status labels, and
+the Dependencies "Host" rename.
+
+---
+
 ## 2026-08-10 — V2.13.2 (Library review mode refinements) built, app-only, awaiting your checkpoint test (D123)
 
 ### D123 · Review's nav entry gets the real stage-priority list; Apply runs on decided images only via move+delete; review mode stays embedded instead of full-screen

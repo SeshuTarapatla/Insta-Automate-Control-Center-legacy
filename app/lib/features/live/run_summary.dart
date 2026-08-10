@@ -205,8 +205,12 @@ class _CounterChip extends StatelessWidget {
     final fg = kind.onContainer(tokens);
     final radius = BorderRadius.circular(tokens.geometry.radiusSm);
 
+    // V2.13.3/D121: matches `StatusChip`'s own bumped sizing (`ui/status.dart`)
+    // — the label word was still `labelSmall` even though the count beside it
+    // already reads at `labelMedium` (`TextRole.label`), an internal mismatch
+    // on top of the same "too small" complaint.
     final chip = Container(
-      padding: EdgeInsets.symmetric(horizontal: tokens.space.xs, vertical: 1),
+      padding: EdgeInsets.symmetric(horizontal: tokens.space.sm, vertical: 2),
       decoration: BoxDecoration(
         color: kind.container(tokens),
         borderRadius: radius,
@@ -215,7 +219,7 @@ class _CounterChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text('$label ', style: Theme.of(context).textTheme.labelSmall?.copyWith(color: fg)),
+          Text('$label ', style: Theme.of(context).textTheme.labelMedium?.copyWith(color: fg)),
           AnimatedCounter(value, role: TextRole.label, color: fg),
         ],
       ),

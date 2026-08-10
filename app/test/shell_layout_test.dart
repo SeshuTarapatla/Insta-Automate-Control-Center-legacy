@@ -310,4 +310,21 @@ void main() {
     expect(find.text('MONITOR'), findsNothing);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('nav rail collapse toggle responds to a tap anywhere in its row, not just the icon', (tester) async {
+    // V2.13.3/D121: the toggle used to be a small `IconButton`, and
+    // expanding relocates it — every click after the first needed the
+    // cursor to chase it across the row. Tapping the row's far-left edge
+    // (well away from the icon, which sits right-aligned when expanded)
+    // must still toggle it now that the whole strip is the hit target.
+    await _pump(tester);
+    expect(find.text('MONITOR'), findsOneWidget);
+
+    final railRect = tester.getRect(find.byType(AppNavRail));
+    await tester.tapAt(Offset(railRect.left + 12, railRect.bottom - 12));
+    await tester.pumpAndSettle();
+
+    expect(find.text('MONITOR'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 }

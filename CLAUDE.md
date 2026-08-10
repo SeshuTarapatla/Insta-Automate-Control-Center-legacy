@@ -351,7 +351,38 @@
 > explicit per-tile `onRequestFocus` tap. Fixed the same way: `_LibraryReviewPageState.initState()`
 > now explicitly calls `_focusNode.requestFocus()` in a post-frame callback. Rebuilt and
 > restarted for you. Full account in DECISIONS.md's D123. **Still awaiting your full checkpoint
-> test — next up after that: V2.13.3**, one checkpoint per session per PLAN_V2's own guidance.
+> test.**
+>
+> **V2.13.3 (Dashboard & shell fixes) built, app-only, awaiting your checkpoint test, D124.** All
+> four PLAN_V2.md findings fixed. The stuck caps tile was root-caused, not guessed: the
+> pipeline's own day-counter queries (`Scan`/`Scrape`/`Follow.fetch()`) always read by today's
+> date correctly, but `heartbeat_loop()` only starts once `wait_for_device()` resolves — with the
+> phone disconnected indefinitely (D116) that never happens, so the agent's `SchedulerMirror`
+> keeps whatever it last held, forever, with no wall-clock awareness of its own. The actual fix is
+> pipeline-side and out of scope (no exception raised); fixed app-side instead, correctly for both
+> of the plan's flagged hypotheses at once: `overview_page.dart` only trusts `liveFlows` while the
+> scheduler reports `online`, and `caps_tile.dart`'s burndown fallback checks its last day against
+> the real wall-clock date before calling it "today" — a new day with no live data reads as 0, not
+> as whatever day the once-per-session snapshot happened to end on. The nav rail's collapse
+> toggle (`shell/nav_rail.dart`) is now a full-row `InkWell` instead of a small relocating
+> `IconButton`. `ui/status.dart`'s `StatusChip` moved from `labelSmall` to `labelMedium` with
+> larger padding — one shared-component change, `run_summary.dart`'s `_CounterChip` (mirrors its
+> shape locally for an `AnimatedCounter`) matched. **A real regression caught by the existing test
+> suite, not live**: the bump immediately overflowed `service_tile.dart`'s tightly-fit "external"/
+> "adopted" origin badge, since `StatusChip`'s `Text` had no `overflow`/`maxLines` for a `Flexible`
+> ancestor to shrink against and a single unbreakable word can't wrap — fixed at the shared
+> component (`maxLines: 1` + ellipsis) rather than special-cased at the one call site that happened
+> to surface it. Dependencies' `DependencyGroup.host` label: `'This machine'` → `'Host'`. Every new
+> regression test (`caps_tile_test.dart`, a `shell_layout_test.dart` case, a `status_test.dart`
+> case) was confirmed to actually fail against its pre-fix code before being trusted. `flutter
+> analyze` clean, `flutter test` 232/232 minus D114's same pre-existing, unrelated
+> `shell_layout_test.dart` icon-size failure (reconfirmed via `git stash` before writing any code).
+> `flutter build windows --debug` succeeds. Built, the stale prior instance killed, and started
+> fresh for you per rule 5. **Not yet checkpoint-tested live** — the phone is still disconnected
+> (D116), so Finding #1's fix can't be exercised against a real day rollover this session; the
+> rest (nav rail toggle, Live/Dependencies label sizing, the "Host" rename) is checkable now. Full
+> account in DECISIONS.md's D124. **Next up after both V2.13.2 and V2.13.3 are confirmed: V2.14**,
+> one checkpoint per session per PLAN_V2's own guidance.
 >
 > **Scope boundary: v2 is entirely inside `app/`.** No agent, pipeline, helm or mobile
 > changes; no redeploys; no cross-repo branches. Every piece of data the redesign needs is

@@ -36,7 +36,7 @@ enum DependencyGroup {
   String get label => switch (this) {
     DependencyGroup.cluster => 'Cluster',
     DependencyGroup.pipeline => 'Pipeline',
-    DependencyGroup.host => 'This machine',
+    DependencyGroup.host => 'Host',
   };
 
   String get blurb => switch (this) {

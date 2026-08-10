@@ -241,14 +241,21 @@ class _CollapseToggle extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: IconButton(
-        tooltip: collapsed ? 'Expand navigation  (Ctrl+B)' : 'Collapse navigation  (Ctrl+B)',
-        iconSize: 16,
-        visualDensity: VisualDensity.compact,
-        icon: AppIcon(collapsed ? AppIcons.chevronRight : AppIcons.sidebarCollapse, size: IconSize.sm),
-        onPressed: () => ref.read(navRailCollapsedProvider.notifier).toggle(),
+    final tooltip = collapsed ? 'Expand navigation  (Ctrl+B)' : 'Collapse navigation  (Ctrl+B)';
+    // V2.13.3/D121: the row used to be clickable only on its small icon
+    // button — expanding relocates that icon to the row's far edge, so every
+    // click after the first needed the cursor to chase it. The whole strip
+    // is the hit target now, same as every `_NavTile` above it.
+    return AppTooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: () => ref.read(navRailCollapsedProvider.notifier).toggle(),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Center(
+            child: AppIcon(collapsed ? AppIcons.chevronRight : AppIcons.sidebarCollapse, size: IconSize.sm),
+          ),
+        ),
       ),
     );
   }

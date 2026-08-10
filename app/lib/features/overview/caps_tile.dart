@@ -12,6 +12,15 @@ import '../../ui/data.dart';
 import '../../ui/status.dart';
 import '../../ui/text.dart';
 
+/// `BurndownDay.date` is a Postgres `date` column serialized with Python's
+/// `date.isoformat()` (agent's `insights.py::_iso`) — always `YYYY-MM-DD`,
+/// so a plain local-clock format matches it without needing `intl`.
+String _todayKey() {
+  final now = DateTime.now();
+  String pad2(int n) => n.toString().padLeft(2, '0');
+  return '${now.year}-${pad2(now.month)}-${pad2(now.day)}';
+}
+
 class _CapRow {
   const _CapRow({required this.label, required this.field, required this.days, required this.limit, this.live});
   final String label;
@@ -100,7 +109,16 @@ class _CapBar extends StatelessWidget {
     final theme = Theme.of(context);
     final tokens = theme.tokens;
     final liveToday = (row.live?[row.field] as num?)?.toInt();
-    final today = liveToday ?? (row.days.isEmpty ? 0 : (row.days.last.values[row.field] ?? 0));
+    // The burndown fallback is a once-per-session snapshot (see the class
+    // doc comment above) — its last entry is only really "today" if the
+    // calendar day hasn't rolled over since it was fetched. Once it has,
+    // that entry is yesterday's real total, and showing it unlabelled as
+    // today's count is exactly the frozen-numbers bug this tile shipped
+    // with (D121/V2.13.3) — a new day with no live data yet reads as 0,
+    // not as whatever the last known day happened to total.
+    final lastDay = row.days.isEmpty ? null : row.days.last;
+    final fallbackToday = lastDay != null && lastDay.date == _todayKey() ? (lastDay.values[row.field] ?? 0) : 0;
+    final today = liveToday ?? fallbackToday;
     final limit = row.limit;
     final series = row.days.length <= 7 ? row.days : row.days.sublist(row.days.length - 7);
     final values = [for (final day in series) day.values[row.field] ?? 0];

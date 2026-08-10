@@ -155,8 +155,12 @@ class StatusChip extends StatelessWidget {
     final fg = kind.onContainer(tokens);
     final radius = BorderRadius.circular(tokens.geometry.radiusSm);
 
+    // V2.13.3/D121: bumped from `labelSmall`/1-3px padding — status labels
+    // (Live's counters, the Dependencies table) read too small at that size.
+    // One shared-component change rather than a per-call-site tweak, same
+    // pattern V2.2/V2.7/V2.9 already established.
     final chip = Container(
-      padding: EdgeInsets.symmetric(horizontal: dense ? tokens.space.xs : tokens.space.sm, vertical: dense ? 1 : 3),
+      padding: EdgeInsets.symmetric(horizontal: dense ? tokens.space.sm : tokens.space.md, vertical: dense ? 2 : 5),
       decoration: BoxDecoration(
         color: kind.container(tokens),
         borderRadius: radius,
@@ -166,10 +170,23 @@ class StatusChip extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (icon != null) ...[
-            Icon(icon, size: tokens.space.iconSm, color: fg),
+            Icon(icon, size: tokens.space.iconMd, color: fg),
             SizedBox(width: tokens.space.xs),
           ],
-          Text(label, style: Theme.of(context).textTheme.labelSmall?.copyWith(color: fg)),
+          // A single-word label (`service_tile.dart`'s "external"/"adopted"
+          // badge, squeezed alongside a state label + uptime in a fixed
+          // 300px tile) can't wrap onto a second line — without an explicit
+          // ceiling it overflows instead of shrinking, the exact regression
+          // the size bump above introduced (V2.13.3/D121). `Flexible`
+          // ancestors get somewhere to actually shrink to now.
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(color: fg),
+            ),
+          ),
         ],
       ),
     );

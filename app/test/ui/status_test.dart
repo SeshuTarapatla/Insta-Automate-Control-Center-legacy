@@ -22,6 +22,21 @@ void main() {
     expect(find.byIcon(Icons.warning_amber), findsOneWidget);
   });
 
+  testWidgets('StatusChip shrinks a single-word label instead of overflowing when squeezed', (tester) async {
+    // V2.13.3/D121's own sizing bump made `service_tile.dart`'s "external"/
+    // "adopted" badge overflow its fixed 300px tile — a single unbreakable
+    // word can't wrap, so without an explicit ceiling on the chip's own
+    // Text it forces a RenderFlex overflow rather than shrinking.
+    await pumpUi(
+      tester,
+      SizedBox(
+        width: 40,
+        child: Row(children: [Flexible(child: StatusChip(kind: StatusKind.neutral, label: 'adopted', dense: true))]),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('CountBadge hides at zero unless dot mode', (tester) async {
     await pumpUi(tester, const CountBadge(count: 0));
     expect(find.byType(CountBadge), findsOneWidget);

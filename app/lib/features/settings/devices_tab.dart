@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../core/app_snack_bar.dart';
+import '../../core/device_models.dart';
 import '../../core/pairing_models.dart';
 import '../../core/relative_time.dart';
 import '../../core/theme/tokens.dart';
@@ -14,6 +15,7 @@ import '../../ui/icons.dart';
 import '../../ui/page.dart';
 import '../../ui/surfaces.dart';
 import '../../ui/text.dart';
+import '../live/device_bar.dart';
 import 'devices_controller.dart';
 
 /// CP 6.3 — the desktop half of mobile pairing (ARCHITECTURE §7). Placement
@@ -52,6 +54,15 @@ class DevicesTab extends ConsumerWidget {
             emptyView: const EmptyView(icon: Icons.phone_android_outlined, title: 'No devices paired yet'),
             data: (devices) => Column(children: [for (final d in devices) _DeviceTile(device: d)]),
           ),
+          SizedBox(height: tokens.space.xxl),
+          SectionHeader(
+            title: 'ADB device',
+            caption: 'Which attached phone the agent drives for the device bar and screen mirror. '
+                'Only needed when more than one is ever attached — otherwise the pipeline\'s own '
+                'default is used automatically.',
+          ),
+          SizedBox(height: tokens.space.lg),
+          const _DeviceIdentityCard(),
         ],
       ),
     );
@@ -272,6 +283,144 @@ class _PairedContent extends StatelessWidget {
         SizedBox(width: tokens.space.lg),
         Expanded(child: Text('Paired "$name" successfully.', style: theme.textTheme.bodyMedium)),
       ],
+    );
+  }
+}
+
+/// PLAN V2.13.1: `GET /api/device`'s `pinned_serial`/`default_serial` plus a
+/// live `GET /api/device/adb-devices` dropdown — separate from the pairing
+/// card above, which is about *phones receiving notifications* (CP 6.1's LAN
+/// pairing token), not the one ADB-connected phone the pipeline drives.
+class _DeviceIdentityCard extends ConsumerStatefulWidget {
+  const _DeviceIdentityCard();
+
+  @override
+  ConsumerState<_DeviceIdentityCard> createState() => _DeviceIdentityCardState();
+}
+
+class _DeviceIdentityCardState extends ConsumerState<_DeviceIdentityCard> {
+  final _serialController = TextEditingController();
+  bool _pinning = false;
+
+  @override
+  void dispose() {
+    _serialController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pin(String? serial) async {
+    setState(() => _pinning = true);
+    try {
+      await ref.read(deviceControllerProvider.notifier).setPinnedSerial(serial);
+      if (mounted) {
+        AppSnackBar.show(context, serial == null ? 'Cleared the pinned device — using the default again.' : 'Pinned $serial.');
+        _serialController.clear();
+      }
+    } on DioException {
+      if (mounted) AppSnackBar.show(context, 'Could not reach the agent', isError: true);
+    } finally {
+      if (mounted) setState(() => _pinning = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = theme.tokens;
+    final deviceAsync = ref.watch(deviceControllerProvider);
+    final adbDevicesAsync = ref.watch(adbDevicesProvider);
+    final pinnedSerial = deviceAsync.value?.pinnedSerial;
+
+    return AppPanel(
+      level: SurfaceLevel.raised,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              AppIcon(AppIcons.device, size: IconSize.lg, color: tokens.content.secondary),
+              SizedBox(width: tokens.space.lg),
+              Expanded(child: _CurrentDeviceLine(async: deviceAsync)),
+            ],
+          ),
+          SizedBox(height: tokens.space.lg),
+          Text('Attached devices', style: theme.textTheme.bodySmall?.copyWith(color: tokens.content.secondary)),
+          SizedBox(height: tokens.space.sm),
+          adbDevicesAsync.when(
+            data: (devices) => devices.isEmpty
+                ? Text('None detected — is adb running?', style: theme.textTheme.bodyMedium)
+                : Wrap(
+                    spacing: tokens.space.sm,
+                    runSpacing: tokens.space.sm,
+                    children: [
+                      for (final d in devices)
+                        ChoiceChip(
+                          label: Text('${d.serial} · ${d.state}'),
+                          selected: pinnedSerial == d.serial,
+                          onSelected: _pinning ? null : (_) => _pin(d.serial),
+                        ),
+                    ],
+                  ),
+            loading: () => const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+            error: (_, _) => Text('adb is not reachable from the agent.', style: theme.textTheme.bodyMedium),
+          ),
+          SizedBox(height: tokens.space.lg),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _serialController,
+                  enabled: !_pinning,
+                  decoration: const InputDecoration(labelText: 'Pin a serial by hand', isDense: true),
+                  onSubmitted: (value) {
+                    final serial = value.trim();
+                    if (serial.isNotEmpty) _pin(serial);
+                  },
+                ),
+              ),
+              SizedBox(width: tokens.space.sm),
+              OutlinedButton(
+                onPressed: _pinning
+                    ? null
+                    : () {
+                        final serial = _serialController.text.trim();
+                        if (serial.isNotEmpty) _pin(serial);
+                      },
+                child: const Text('Pin'),
+              ),
+              if (pinnedSerial != null) ...[
+                SizedBox(width: tokens.space.sm),
+                TextButton(onPressed: _pinning ? null : () => _pin(null), child: const Text('Use default')),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CurrentDeviceLine extends StatelessWidget {
+  const _CurrentDeviceLine({required this.async});
+  final AsyncValue<DeviceStatus> async;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return async.when(
+      loading: () => const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+      error: (error, _) => Text('Could not read device status.', style: theme.textTheme.bodyMedium),
+      data: (status) {
+        final label = status.model ?? status.serial ?? 'no device';
+        final pinned = status.pinnedSerial != null;
+        return Text(
+          pinned
+              ? 'Pinned to $label — the pipeline\'s own default is ${status.defaultSerial ?? 'not set'}.'
+              : 'Using the default device: $label.',
+          style: theme.textTheme.bodyMedium,
+        );
+      },
     );
   }
 }

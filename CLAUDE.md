@@ -263,19 +263,68 @@
 > `flutter build windows --debug` succeeds. Rebuilt and restarted for you. **You confirmed the
 > checkpoint test live, including the arrow-key scroll fix — V2.12 accepted.**
 >
-> **Next up: V2.13 (Motion, accessibility, release)** — see PLAN_V2.md's `## V2.13 — Motion,
-> accessibility, release` section. The last checkpoint in the plan: a motion audit against
-> `motion.reduced`, the accessibility floor (tooltips/semantics on every icon-only button, focus
-> order, dialog focus trapping), a `MouseCursor` sweep, a performance check (the library grid at
-> 7,655 thumbnails, the log console at a few thousand lines, Mica compositing while a terminal
-> streams), `docs/ARCHITECTURE.md` §9 updated to describe what v2 actually built, and finally
-> `pubspec.yaml` → `2.0.0+1` with the `v2.0.0` tag. New session recommended (PLAN_V2's own
-> "one checkpoint per session" guidance).
+> **2026-08-10: nine live bugs/feature requests grouped into three checkpoints ahead of
+> release, planning only — no code changed this session (D121).** With V2.5–V2.12 all
+> accepted, the user brought nine things found using the real app — too many for one
+> checkpoint, not release polish. Grouped by touched surface into three new sub-checkpoints
+> inserted between V2.12 and the release checkpoint: **V2.13.1 (Device identity)** — cache
+> the ADB phone's model instead of showing its serial once it's been seen the first time
+> (agent-side persistence), plus a Settings control to pin a serial by hand or pick from a
+> live adb-devices dropdown; **V2.13.2 (Library review mode refinements)** — the nav rail's
+> Review entry point wrongly reuses Overview's deliberately-narrowed `curationFolders` list
+> (D115) and so can never land on `gender_invalid` even though it's first in review-priority
+> order, Apply currently requires every loaded image be decided before it unlocks at all
+> (too strict for a large batch — should apply the decided green/red images and leave gray
+> ones for later, likely via D90's `POST /api/library/move` + `delete()` rather than the
+> whole-directory `apply()`), and review mode should keep the nav rail visible instead of
+> going full-screen (a real reversal of one specific piece of D115, scoped to the nav rail
+> only); **V2.13.3 (Dashboard & shell fixes)** — Overview's caps tile still shows yesterday's
+> numbers a day after every flow was stopped and the calendar day rolled over (two
+> hypotheses flagged, neither confirmed — see PLAN_V2.md), the nav rail's collapse/expand
+> button needs a precise click instead of anywhere-in-the-row, `ui/status.dart`'s shared
+> `StatusChip` (used by Live's counters and Dependencies) reads too small, and Dependencies'
+> "This machine" group renames to "Host." **The former V2.13 (Motion, accessibility,
+> release) is renumbered V2.14 — content unchanged, still last.** V2.13.1 is flagged as the
+> plan's one deliberate exception to "v2 is `app/`-only," since model-caching and an
+> adb-device-list read both need agent-side code. Full grouping rationale in
+> `docs/DECISIONS.md`'s D121; full checkpoint content (findings, files, checkpoint tests) in
+> `docs/v2/PLAN_V2.md`'s own V2.13.1/V2.13.2/V2.13.3 sections.
+>
+> **V2.13.1 (Device identity) built, agent-side + app-side, awaiting your checkpoint test,
+> D122.** New agent-side `ia_agent/device_settings.py` persists a `{serial: model}` cache and
+> an optional pinned serial (`%LOCALAPPDATA%\ia-agent\device.json`); `GET /api/device`'s model
+> now survives a disconnect instead of reverting to the bare serial, falling back to the cache
+> only when a live adb read fails, and a real fix keeps that cache from evicting on a
+> transient failure — it only updates on a genuine successful read. Two new routes:
+> `GET /api/device/adb-devices` (every serial adb knows, online or not) and
+> `PATCH /api/device/pinned-serial`; every direct `ANDROID_SERIAL` read in the device router
+> (`GET /api/device`, both `POST /api/device/scrcpy/*` calls) now goes through a new
+> `_effective_serial()` that prefers the pin — `services/selftest.py`'s own pipeline-device
+> functional test is deliberately untouched, a different question from which device the
+> control center's own bar/mirror target. App side: `DeviceStatus` gained
+> `pinnedSerial`/`defaultSerial` (both optional, so none of the six existing test call sites
+> needed touching), a new `_DeviceIdentityCard` in Settings → Devices (its own "ADB device"
+> section below the existing pairing card — a different system, LAN pairing vs. the ADB phone)
+> with a tap-to-pin chip row and a manual-serial fallback. `agent/tests/test_device.py` grew to
+> 16 checks plus a direct, unmocked test of the cache-survives-a-failure logic; all 15 other
+> agent suites re-run clean. `flutter analyze` clean, `flutter test` 226/226 minus D114's same
+> pre-existing `shell_layout_test.dart` failure (reconfirmed via `git stash` before writing any
+> code). `flutter build windows --debug` succeeds. Verified live against the real agent
+> (restarted, both non-`adb` supervised services stayed `adopted`; a real
+> `GET`/`PATCH`/`GET /adb-devices` round trip over `curl`, `device.json` confirmed empty again
+> afterward). Built and started for you per rule 5. **Not yet checkpoint-tested live** — the
+> phone is still disconnected (D116), so real model caching can't be exercised against a real
+> device this session; the pin/dropdown mechanics are still checkable from the app. Full
+> account in DECISIONS.md's D122. **Next up: V2.13.2**, one checkpoint per session per
+> PLAN_V2's own guidance.
 >
 > **Scope boundary: v2 is entirely inside `app/`.** No agent, pipeline, helm or mobile
 > changes; no redeploys; no cross-repo branches. Every piece of data the redesign needs is
 > already served by an existing endpoint. If a checkpoint seems to need an agent change, it
-> almost certainly doesn't — stop and re-check.
+> almost certainly doesn't — stop and re-check. **One flagged exception: V2.13.1** (D121)
+> deliberately touches `agent/` for device-model caching and an adb-device-list read — see
+> its own paragraph above and PLAN_V2.md's scope note. Nothing else in the plan gets this
+> exception without being raised explicitly first.
 >
 > **The app has been observed** — rule 5 was lifted for one session on 2026-08-04 (D97) and
 > every screen was captured against the live agent. See

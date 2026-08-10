@@ -71,6 +71,13 @@ LIBRARY_SETTINGS_PATH = AGENT_DATA_DIR / "library.json"
 # path to still resolve later.
 IMAGE_CACHE_DIR = AGENT_DATA_DIR / "cache"
 
+# Cached ADB serial->model map plus an optional pinned serial (PLAN V2.13.1) —
+# machine-local for the same D12 reason: which physical device the control
+# center's own device bar/mirror targets is a desktop-app concern, not
+# something the pipeline reads. The pipeline keeps driving whatever
+# ANDROID_SERIAL its own .env names, untouched by this file.
+DEVICE_SETTINGS_PATH = AGENT_DATA_DIR / "device.json"
+
 # Paired phones (PLAN CP 6.1, ARCHITECTURE §7) — device id/name/token/last_seen.
 # Machine-local for the same D12 reason every other *.json settings file is:
 # which phones are paired is a property of this agent instance, not the

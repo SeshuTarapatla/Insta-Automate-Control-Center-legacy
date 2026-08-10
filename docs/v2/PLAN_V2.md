@@ -37,7 +37,20 @@ Same discipline as PLAN.md's phases, and the same project rules apply unchanged:
 > agent change, stop and re-check — it almost certainly doesn't, and if it genuinely does
 > that's a scope decision for the user, not something to absorb quietly.
 
-`app/pubspec.yaml` version goes `1.0.0+1` → `2.0.0+1` in **V2.13**, not before.
+`app/pubspec.yaml` version goes `1.0.0+1` → `2.0.0+1` in **V2.14**, not before.
+
+**2026-08-10 (D121): three bug-fix checkpoints inserted ahead of the release checkpoint.**
+The user brought nine live bugs/feature requests found using the accepted V2.5–V2.12 work,
+too many for one checkpoint and not release-polish, so they don't belong in what was V2.13.
+Grouped into three sub-checkpoints — **V2.13.1, V2.13.2, V2.13.3** — inserted between V2.12
+and the release checkpoint, which is renumbered **V2.14** (still "Motion, accessibility,
+release," content unchanged). This is a planning-only session — no code changed. See
+`docs/DECISIONS.md`'s D121 for the full grouping rationale.
+
+**Scope note:** V2.13.1 is the first checkpoint in this whole plan expected to touch
+`agent/`, not just `app/` — a deliberate, acknowledged exception to the scope boundary
+above, the same class of call as the 2026-08-05 cross-repo deviation (D113). Flagged here
+so it isn't mistaken for scope creep when the implementation session gets there.
 
 ---
 
@@ -341,7 +354,136 @@ prompts. Confirm `Esc` dismisses and focus returns where it was.
 
 ---
 
-## V2.13 — Motion, accessibility, release
+## V2.13.1 — Device identity
+
+**Goal:** the ADB-paired phone is identified by model everywhere, not its serial, and the
+user can point the agent at a specific device instead of whatever it happens to find first.
+
+Two live requests, grouped because both touch the same device-identification surface
+(`core/device_models.dart`'s `DeviceStatus`, agent's `GET /api/device`) rather than because
+they're the same size — #2 is the bigger of the two.
+
+- **Cache the model, don't just fetch it live.** `ia_agent/api/device.py`'s `_device_model()`
+  (D46) already does a best-effort `adbutils` lookup on every `GET /api/device` call and
+  falls back to the bare serial on failure — but it never persists anything, so the fallback
+  fires every time the phone is merely disconnected, not just on a device seen for the first
+  time. Add agent-side persistence (`%LOCALAPPDATA%\ia-agent\`, the same machine-local
+  precedent as D12/D50/D65's own device/session state): the first time a serial resolves to
+  a real model, cache `{serial: model}` — it's fixed hardware, this never needs to expire —
+  and serve the cached model on every subsequent request even while disconnected, falling
+  back to the bare serial only for a serial that's never been seen at all. Today `serial`/
+  `model` only render in `features/live/device_bar.dart` (confirmed the only app-side call
+  site — the paired-phone list in Settings → Devices is a different system, CP 6.1's LAN
+  pairing `id` token, not the ADB serial, and is unaffected).
+- **A Settings control to pick the device.** Today the agent's adb lookup implicitly targets
+  whatever `adbutils` finds first — fine with one phone attached, silently wrong with more
+  than one. New Settings control (Devices tab, alongside the existing pairing card): a text
+  field to pin a specific serial by hand, plus — when adb is reachable and reports attached
+  devices — a live dropdown of currently-attached serials to pick from instead of typing.
+  Needs a new agent read endpoint (`adb devices`, agent-side, matching the existing
+  `wsl_bridge`/`window.py` "thin client over an existing tool" shape rather than a new
+  subsystem) and a persisted "pinned serial" setting the device-status lookup prefers over
+  "first device found" whenever one is set.
+
+**Checkpoint test (yours):** disconnect the phone after it's been seen once and confirm
+`DeviceBar` still shows the model, not the serial. With the phone attached, open Settings →
+Devices and confirm the adb dropdown lists it; pin it by serial and confirm nothing changes
+(same device); if a second device is ever available, confirm switching the pin actually
+retargets `GET /api/device`.
+
+---
+
+## V2.13.2 — Library review mode refinements
+
+**Goal:** three corrections to V2.10's review mode (D115) and its entry points, all found by
+actually using it since acceptance.
+
+- **Review nav entry picks the wrong folder.** The nav rail's dedicated **Review** sub-item
+  (`shell/nav_rail.dart:94`) and the Overview curation tile's "Review →" button
+  (`features/overview/curation_tile.dart:61`) both open `curationFolders.first` —
+  but `curationFolders` (`curation_tile.dart:18`) is `['gender_valid', 'scraped']`,
+  **deliberately excluding `gender_invalid`** per D115's own call to keep Overview's
+  "needs attention" surface narrow. That narrowing was correct for Overview's badge/hero
+  sentence; reusing the same list as the nav rail's review *entry point* is the bug — it
+  means Review can never land on `gender_invalid` at all, regardless of backlog, even though
+  it's first in the real YOUR REVIEW stage order (`gender_invalid → gender_valid → scraped`,
+  D115's last addendum) and items selected there are exactly what feeds `gender_valid`. Fix:
+  give the nav rail's Review entry its own folder-priority list matching the real stage
+  order, and pick the first of those three with a nonzero backlog count — leave Overview's
+  `curationFolders` (hero tile, curation tile's own badge, command palette) untouched, since
+  D115's narrowing there was intentional and about a different surface.
+- **Apply requires every loaded image decided — too strict for a large batch.** `review_page.dart`'s
+  `canApply` (line 209) requires `images.every((e) => _decisions.containsKey(e.name))` before
+  Apply unlocks at all — built deliberately (the comment at lines 204-209) to avoid ever
+  presenting a partial set as the whole folder, D90's mobile bug in a new shape. The user
+  wants a looser rule for the common case of working a folder in convenient chunks: apply
+  whatever's actually been decided (green keeps, red discards) and leave undecided (gray)
+  images untouched for a later session, instead of blocking Apply on finishing the whole
+  loaded set. The folder-wide `POST /api/library/apply` (CP 5.2) can't express this — it
+  reads the directory fresh and trashes *everything not selected*, so it structurally can't
+  leave an undecided image alone. **The reusable primitive already exists**: D90 built
+  `POST /api/library/move` (explicit `{from, to}` pairs, touches nothing else) alongside the
+  existing explicit-path `delete()`, specifically because `apply()`'s whole-directory
+  assumption was already wrong for one other case (mobile's paginated apply). Review mode's
+  partial-apply almost certainly wants the same pair — move the green decisions, delete the
+  red ones, never call `apply()` — rather than a new endpoint. Full design (what "Apply"
+  should say/confirm when some images are left gray, whether the review session can be
+  resumed later against the same folder) is for the implementation session.
+- **Review mode takes the whole window — keep the nav rail visible.** D115 built review mode
+  as "a real full-screen route covering the title bar and nav rail entirely, matching
+  SCREENS.md §5b's own mockup" — a deliberate choice at the time. The user now wants the left
+  nav rail to stay visible and reachable, with review confined to the Library page's own
+  content area instead. This is a real reversal of that specific piece of D115, not a bug —
+  scope it to the nav rail only (the user didn't ask about the title bar) and treat
+  everything else about review mode (keyboard map, filmstrip, progress, batch buffer, Apply
+  flow) as unchanged.
+
+**Checkpoint test (yours):** with a backlog in `gender_invalid`, click Review from the nav
+rail and confirm it opens there, not `gender_valid`. Decide a handful of images in a large
+folder, leave the rest gray, and confirm Apply now runs on just the decided ones without
+complaint — then reopen the same folder and confirm the undecided images are still there,
+undecided. Confirm the nav rail stays visible and clickable while reviewing.
+
+---
+
+## V2.13.3 — Dashboard & shell fixes
+
+**Goal:** four smaller, unrelated fixes grouped together because each is a quick, contained
+polish/bug item rather than because they share a surface.
+
+- **Caps tile stuck on yesterday's numbers.** With every flow switch off since yesterday and
+  the calendar day rolled over, Overview's `CapsTile` still shows yesterday's caps as if they
+  were today's. D116 already fixed the tile to prefer `liveFlows?[flow]?.today` (the
+  scheduler heartbeat's live `flows.state`, pushed continuously per D28 regardless of whether
+  a flow is actually triggering) over the once-per-session `burndown` snapshot — but that
+  fix assumed a new day's counter always exists once the day rolls over. Two hypotheses to
+  check at implementation time, not yet confirmed: (a) the agent/pipeline's day-counter row
+  is only created lazily on a flow's *first trigger* of a new day, so with every flow stopped
+  indefinitely no such row is ever created and the heartbeat keeps reporting the last real
+  (yesterday's) row; or (b) `features/overview/caps_tile.dart`'s own fallback logic has a path
+  where `liveFlows` is present but stale and it never re-derives "today" from the wall clock.
+  Start with the scheduler's day-counter/heartbeat logic and `caps_tile.dart` itself.
+- **Nav rail's collapse/expand button needs a precise click.** `shell/nav_rail.dart`'s
+  `_CollapseToggle` is a small `IconButton`; expanding relocates it, so the user has to move
+  the cursor and click again each time rather than clicking anywhere in that row. Make the
+  whole horizontal strip containing the toggle clickable (`InkWell` spanning the row's full
+  width), not just the icon itself.
+- **Status labels read too small.** `ui/status.dart`'s `StatusChip` (and its compact dot+label
+  variant) is the shared themed status-label component used by Live's counters and the
+  Dependencies table. Bump its sizing (padding/font) up modestly — one shared-component
+  change, same pattern V2.2/V2.7/V2.9 already established, rather than per-call-site tweaks.
+- **Rename Dependencies' "This machine" group.** `core/dependency_models.dart:39` —
+  `DependencyGroup.host`'s label goes from `'This machine'` to `'Host'`. One-line change.
+
+**Checkpoint test (yours):** stop every flow, let a day roll over (or simulate it), and
+confirm Overview's caps tile shows real zeros/live counts for the new day, not yesterday's
+frozen numbers. Confirm the nav rail toggle responds to a click anywhere in its row, not just
+the icon. Confirm status labels on Live and Dependencies read visibly larger. Confirm
+Dependencies' host group now reads "Host."
+
+---
+
+## V2.14 — Motion, accessibility, release
 
 **Goal:** the final pass, then tag.
 
@@ -376,12 +518,18 @@ confirm the app goes still.
   | **Visual** | V2.6, V2.7, V2.9, V2.5, V2.8 (in that order) | Redesigns how something already works looks or is organized — the underlying capability doesn't change. V2.6 (Flows pipeline) and V2.9 (Library's per-folder aspect ratio) lead, per this doc's own "most transformative"/"highest-impact" calls; V2.5 (Shell) and V2.8 (Live) follow as more incremental. |
   | **Functional** | V2.10, V2.12, V2.11 (in that order) | Adds a genuinely new interaction or capability. V2.10 (Library review mode) leads — it's the headline feature of all of v2, and is unlocked the moment V2.9 lands; V2.12 (Command palette) is next since `Ctrl+K` doesn't exist at all today; V2.11 (Services/Insights/Settings) last, since its real functional additions (terminal search/copy/font-size, resizable panes) are the least load-bearing of the three. |
 
-  **Execution order: V2.6 → V2.7 → V2.9 → V2.5 → V2.8 → V2.10 → V2.12 → V2.11 → V2.13.**
+  **Execution order: V2.6 → V2.7 → V2.9 → V2.5 → V2.8 → V2.10 → V2.12 → V2.11 → V2.13.1 →
+  V2.13.2 → V2.13.3 → V2.14.**
 - **V2.10 depends on V2.9** — satisfied by the order above (V2.9 comes before V2.10 either
   way). Nothing else in V2.5–V2.12 depends on anything else in that range.
-- **V2.13 is always last**, regardless of how the rest is ordered — it audits whatever
-  V2.5–V2.12 actually produced (motion, accessibility, performance), so there's nothing for
-  it to check until they're done.
+- **V2.13.1–V2.13.3 are a 2026-08-10 (D121) out-of-band insertion**, not part of the
+  original visual/functional split above — three bug-fix/feature-request checkpoints found
+  by using the already-accepted V2.5–V2.12 work, grouped by touched surface (device
+  identity; Library review mode; dashboard & shell). They're mutually independent and could
+  run in any order; listed 1→3 in the order the user raised them, not by dependency.
+- **V2.14 is always last**, regardless of how the rest is ordered — it audits whatever every
+  other checkpoint (V2.5–V2.13.3) actually produced (motion, accessibility, performance), so
+  there's nothing for it to check until they're all done.
 - If the session running this is Sonnet with a limited context budget, **one checkpoint per
   session** is the right granularity. V2.3 needed two.
 
@@ -393,7 +541,7 @@ confirm the app goes still.
 | Daylight/Swiss expose dark-mode assumptions that never had to be tokens | V2.4's checkpoint test walks every screen in Daylight specifically, for exactly this. |
 | ~~The real window is tall and narrow, and I have never seen it~~ | ✅ **Closed** — the app was observed 2026-08-04 (D97). The window is landscape, 1253 × 1013 logical; the affected sections are corrected. See [OBSERVED.md](OBSERVED.md). |
 | Review mode writes to real curation data | Nothing written until Apply; existing endpoint; existing confirm dialog; `Esc`-writes-nothing tested explicitly. |
-| Scope creep across 13 checkpoints | The scope boundary at the top: no agent, pipeline, helm or mobile changes. If a checkpoint seems to need one, stop and ask. |
+| Scope creep across the checkpoint list | The scope boundary at the top: no agent, pipeline, helm or mobile changes — **except V2.13.1**, an acknowledged, flagged exception (D121). If any other checkpoint seems to need one, stop and ask. |
 | A theme's contrast fails after a hand-tweak | `theme_contrast_test.dart` runs in every checkpoint's gate, not just V2.4's. |
 
 ## What v2 explicitly does not do
@@ -404,6 +552,8 @@ confirm the app goes still.
 - **No `fl_chart` 1.x upgrade.** Pinned at `^0.69.0` through v2.0.0; the breaking upgrade is
   a post-release item, best done alongside a chart redesign rather than inside a theming
   project.
-- **No new agent endpoints, no new data.** Every redesign is a better presentation of data
-  the agent already serves.
+- **No new agent endpoints, no new data — except V2.13.1.** Every other checkpoint's
+  redesign is a better presentation of data the agent already serves; V2.13.1 (device
+  identity caching + a manual/adb-dropdown device picker) is the one deliberate,
+  D121-flagged exception.
 - **No light-theme mobile parity, no web build, no localisation.** Out of scope.

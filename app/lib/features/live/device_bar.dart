@@ -39,9 +39,35 @@ class DeviceController extends AsyncNotifier<DeviceStatus> {
     await dio.post('/api/device/scrcpy/${mirroring ? 'stop' : 'start'}');
     await refresh();
   }
+
+  /// Every serial adb currently knows about (PLAN V2.13.1) — for Settings'
+  /// device-pin dropdown, not this bar; a plain fetch rather than watched
+  /// state, since nothing here needs to react to it live.
+  Future<List<AdbDeviceInfo>> fetchAdbDevices() async {
+    final dio = ref.read(agentClientProvider);
+    final response = await dio.get('/api/device/adb-devices');
+    final devices = (response.data as Map<String, dynamic>)['devices'] as List<dynamic>;
+    return [for (final d in devices) AdbDeviceInfo.fromJson(d as Map<String, dynamic>)];
+  }
+
+  /// `null` clears the pin, reverting to the pipeline's own `ANDROID_SERIAL`.
+  Future<void> setPinnedSerial(String? serial) async {
+    final dio = ref.read(agentClientProvider);
+    await dio.patch('/api/device/pinned-serial', data: {'serial': serial});
+    await refresh();
+  }
 }
 
 final deviceControllerProvider = AsyncNotifierProvider<DeviceController, DeviceStatus>(DeviceController.new);
+
+/// A plain, unwatched-by-default fetch (Settings' device-pin dropdown reads
+/// it once per open, same as the pairing card's own one-shot reads) rather
+/// than folded into `deviceControllerProvider`'s own polled state, since the
+/// two have unrelated refresh cadences and a failed adb lookup shouldn't
+/// blank out an otherwise-healthy device status.
+final adbDevicesProvider = FutureProvider.autoDispose<List<AdbDeviceInfo>>(
+  (ref) => ref.read(deviceControllerProvider.notifier).fetchAdbDevices(),
+);
 
 /// Device control, compacted into the Live screen's header row (D46) rather
 /// than a full card in `RunSummary`'s body — CP 4.5's original design showed

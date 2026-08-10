@@ -5,6 +5,121 @@ session can tell a settled question from an open one.
 
 ---
 
+## 2026-08-10 — V2.13.1 (Device identity) built, agent-side + app-side, awaiting your checkpoint test (D122)
+
+### D122 · Cached serial→model map + a pinned-serial override, both agent-side; a new Settings device-pin card on top
+
+**What shipped, agent side (`agent/`).** New `ia_agent/device_settings.py` — a `%LOCALAPPDATA%
+\ia-agent\device.json` settings file, same atomic-write/machine-local shape as
+`library/settings.py` (D12's precedent again): a `pinned_serial` (`None` by default) and a
+`model_cache` (`{serial: model}`). Its `resolve_model(serial, live_lookup)` is the actual fix
+for finding #1 — a live adb read that succeeds updates the cache and returns the fresh model;
+a live read that fails (disconnected, adb down) falls back to whatever's cached for that
+serial instead of `None`, so the device bar only ever reverts to the bare serial for a serial
+it has truly never resolved before, not merely one that's momentarily unplugged.
+`ia_agent/api/device.py`'s `_device_model()` is now a thin wrapper calling `resolve_model`;
+a new `_effective_serial()` (`pinned_serial() or ANDROID_SERIAL`) replaces every direct
+`ANDROID_SERIAL` read in the router — `GET /api/device`'s `serial`/`model` and both
+`POST /api/device/scrcpy/{start,stop}` calls now target the pin when one is set, while
+`services/selftest.py`'s own adb functional test is deliberately untouched, since that's
+about the pipeline's actual driven device (`Insta-Automate/.env`'s own `ANDROID_SERIAL`), a
+different question from which device the control center's own bar/mirror show. Two new
+routes for finding #2: `GET /api/device/adb-devices` (every serial `adb` currently knows
+about, online or offline, via `adbutils.AdbClient.list()` — deliberately not the
+`device_list()`/`iter_device()` filtered-to-online view, so a user can still pin a serial
+that's briefly disconnected) and `PATCH /api/device/pinned-serial` (`{serial: string|null}`,
+`null` clears the pin). `GET /api/device`'s payload grew `pinned_serial`/`default_serial` so
+the client can always show "pinned to X, default is Y" rather than losing track of what the
+override actually overrides.
+
+**What shipped, app side (`app/`).** `core/device_models.dart`'s `DeviceStatus` gained the
+two new optional fields (kept optional, not required, so the six existing test call sites
+across `live_layout_test.dart`/`overview_layout_test.dart`/`shell_layout_test.dart` didn't
+need touching) plus a new `AdbDeviceInfo`. `features/live/device_bar.dart`'s
+`DeviceController` gained `fetchAdbDevices()`/`setPinnedSerial()` and a sibling
+`adbDevicesProvider` (a plain unwatched `FutureProvider`, not folded into the polled device
+status — the two have unrelated refresh cadences, and a failed adb lookup shouldn't blank an
+otherwise-healthy device status). New `_DeviceIdentityCard` in
+`features/settings/devices_tab.dart`, placed in its own "ADB device" section below the
+existing pairing card per PLAN_V2.md's own note that these are two different systems (LAN
+pairing vs. the ADB-connected phone) — a live adb-devices chip row to tap-to-pin, a manual
+text field + Pin button for a serial that isn't currently attached, and a "Use default" button
+that only appears once something is actually pinned.
+
+**Verified.** `agent/tests/test_device.py` grew from 10 to 16 numbered checks plus a direct,
+un-monkeypatched exercise of `device_settings.resolve_model` proving the cache-survives-a-
+failure behavior with real code, not a stub (a `flaky_live` fixture that succeeds once then
+raises, confirmed the second call still returns the cached model and that `live_lookup` was
+genuinely called both times) — real `adbutils` itself stays monkeypatched at
+`device_api._device_model`/`_list_adb_devices` for the endpoint-level checks, the same
+`wsl_bridge`-fake pattern this file already used, since this environment has no real adb
+server to hit. All 15 other agent suites re-run clean (one `test_supervisor.py` failure
+turned out to be a stale lock file left by an earlier interrupted run in this same session,
+confirmed by deleting it and re-running clean — not a regression). `flutter analyze` clean,
+`flutter test` 226 total / 225 passing (225 prior + 1 new in `devices_layout_test.dart`
+covering the pin/clear round trip and confirming no overflow at the 1024px floor; the one
+failure is D114's same pre-existing, unrelated `shell_layout_test.dart` issue, reconfirmed via
+`git stash` on the branch tip before writing any code here). `flutter build windows --debug`
+succeeds. Verified live against the real agent: restarted to pick up the new code (`adb`
+showed its own pre-existing restart churn from the phone still being disconnected per D116,
+unrelated; the other two supervised services stayed `adopted` with uptime intact), a real
+`GET /api/device`/`GET /api/device/adb-devices`/pin/clear round trip over `curl`, and the real
+`device.json` confirmed empty again afterward (the throwaway test pin was cleared, not left
+behind). Built and started for you per rule 5. **Not yet checkpoint-tested live** — the phone
+being disconnected (D116) means model caching itself can't be exercised against a real device
+this session; the pin/dropdown mechanics can still be checked once you're at the app.
+
+---
+
+## 2026-08-10 — Nine live bugs/feature requests grouped into three checkpoints ahead of release (D121)
+
+### D121 · V2.13.1/V2.13.2/V2.13.3 inserted between V2.12 and the renamed V2.14; planning only, no code changed
+
+**Ask.** With V2.5–V2.12 all accepted, the user brought nine things found using the real app
+— too many for one checkpoint, not release polish, and explicitly not meant to block V2.13
+(motion/accessibility/release) from eventually running last. Asked for them to be grouped
+into exactly three sub-checkpoints named `V2.13.X`, with the existing V2.13 renumbered to
+make room — implementation deferred to a future session.
+
+**Grouping.** By touched surface, not by raising order:
+
+| New checkpoint | Items (as given) | Surface |
+|---|---|---|
+| **V2.13.1** — Device identity | #1 (cache model over serial), #2 (manual serial + adb dropdown in Settings) | `core/device_models.dart`, `DeviceBar`, agent's `GET /api/device` |
+| **V2.13.2** — Library review mode refinements | #4 (Review nav lands on the wrong folder), #5 (Apply shouldn't require every image decided), #7 (review mode should keep the nav rail visible, not go full-screen) | `review_page.dart`, `nav_rail.dart`'s Review entry, D115's full-screen decision |
+| **V2.13.3** — Dashboard & shell fixes | #3 (Overview caps tile stuck on yesterday after flows stopped and the day rolled over), #6 (nav rail collapse button needs a precise click), #8 (status labels too small), #9 ("This machine" → "Host") | `caps_tile.dart`, `nav_rail.dart`'s `_CollapseToggle`, `ui/status.dart`'s `StatusChip`, `dependency_models.dart` |
+
+Items #4/#5/#7 group naturally — all inside Library review mode. #1/#2 group naturally —
+both are the same device-identification surface, just different-sized asks. #3/#6/#8/#9 are
+a deliberate leftover bucket: four small, unrelated, contained fixes, grouped together
+because none is large enough to deserve its own checkpoint on its own.
+
+**Renumbering.** The former V2.13 ("Motion, accessibility, release") becomes **V2.14** —
+content unchanged, still the last checkpoint in the plan, still gated on everything before it
+being done. `pubspec.yaml`'s `2.0.0+1` bump and the `v2.0.0` tag move with it.
+
+**Scope exception, flagged rather than silently absorbed.** V2.13.1 is the first checkpoint
+in the whole v2 plan expected to touch `agent/` — model caching and an adb-device-list
+endpoint are both agent-side. PLAN_V2.md's scope boundary ("v2 is entirely within `app/`")
+is otherwise still in force; this is one deliberate, acknowledged exception, the same class
+of call as the 2026-08-05 cross-repo deviation (D113), not a precedent for future checkpoints
+to quietly do the same.
+
+**Investigation flagged, not resolved.** #3 (stale caps tile) has two live hypotheses in
+PLAN_V2.md's V2.13.3 section — a lazily-created day-counter row on the agent/pipeline side
+that never rolls over while every flow stays stopped, or a client-side fallback in
+`caps_tile.dart` that doesn't re-derive "today" from the wall clock — neither confirmed this
+session. #5 (partial Apply) has a concrete reusable primitive already identified (D90's
+`POST /api/library/move` + the existing explicit-path `delete()`, sidestepping `apply()`'s
+whole-directory assumption entirely) but no full design (what "Apply" says when images are
+left gray, whether a folder can be resumed later) — both left for the implementation session.
+
+**Full checkpoint content** — goals, findings, and checkpoint tests for all three — lives in
+[docs/v2/PLAN_V2.md](docs/v2/PLAN_V2.md)'s own V2.13.1/V2.13.2/V2.13.3 sections, not
+duplicated here.
+
+---
+
 ## 2026-08-10 — V2.12 (Command palette) built, planned and completed in one session at your request (D119)
 
 ### D119 · `Ctrl+K` wired to a real registry sourced from eight existing providers; three action paths deduplicated to feed it without a second implementation; Settings/Insights gain tab-jump, Limits gains a "jump to field" highlight

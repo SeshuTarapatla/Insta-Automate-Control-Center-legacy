@@ -575,7 +575,8 @@ class _ReviewFilmstripState extends State<_ReviewFilmstrip> {
       0.0,
       _controller.position.maxScrollExtent,
     );
-    _controller.animateTo(target, duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+    final duration = Theme.of(context).tokens.motion.reduced ? Duration.zero : const Duration(milliseconds: 120);
+    _controller.animateTo(target, duration: duration, curve: Curves.easeOut);
   }
 
   @override

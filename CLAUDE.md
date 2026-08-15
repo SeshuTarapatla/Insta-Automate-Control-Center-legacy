@@ -384,6 +384,63 @@
 > account in DECISIONS.md's D124. **Next up after both V2.13.2 and V2.13.3 are confirmed: V2.14**,
 > one checkpoint per session per PLAN_V2's own guidance.
 >
+> **2026-08-11: V2.13.1/V2.13.2/V2.13.3 all accepted by your own explicit call** ("consider done
+> and tested"), not a separate Claude-run live pass — rule 5 forbids that categorically, so this is
+> the same standing precedent as CP 7.3's partial-pass acceptance and Phase 2/5's outright
+> acceptances. V2.13.1's device-model-caching half stays genuinely unverified against a real
+> device (the phone is still disconnected, D116), accepted as-is by your own call rather than a
+> gate Claude held open.
+>
+> **V2.14's motion and accessibility halves built and awaiting your checkpoint test, D125 —
+> release (the third half) deliberately not started.** PLAN_V2's own V2.14 scope splits into three
+> unrelated pieces; only motion and accessibility are auditable from source and testable headless.
+> Release's own checkpoint test is explicitly "a full pass over every screen in at least three
+> themes... at the real window size" — squarely rule 5's territory, so the `pubspec.yaml` version
+> bump, the `v2.0.0` tag, and the `ARCHITECTURE.md` update all stay undone until that's actually
+> run. Motion: `MotionTokens`/`motion.reduced` was already fully wired since V2.4 (including a real
+> Settings → Appearance override) — the actual gap was six scroll-to-position calls
+> (`library_grid.dart`, `review_page.dart`, `log_console.dart`, `classify_surface.dart`,
+> `limits_tab.dart`, `command_palette.dart`) that never checked `tokens.motion.reduced`, now all
+> instant under reduced motion. Accessibility: the title bar's minimize/maximize/close buttons had
+> no tooltip at all; `AppTooltip`'s `rich: true` path (D93's flow mechanism tooltip and six other
+> call sites) builds a `richMessage` `WidgetSpan` Flutter can't auto-stringify into `Semantics`,
+> fixed once at the shared component; the library grid's image tiles had no click `MouseCursor`;
+> the search field's clear button had no tooltip; and `notification_center.dart`'s bell/panel — a
+> raw `Overlay` popover, not a `showDialog` route, so none of `showDialog`'s free focus trap/
+> restore — had neither, fixed with a `FocusScope` + explicit `Esc` binding. **Getting the panel's
+> focus-claim timing right took two wrong turns, both caught by a new regression test before being
+> trusted**: a `requestFocus()` called right after `overlay.insert()` fired one frame too early
+> (confirmed via `primaryFocus` staying on `MaterialApp`'s own root scope), and `autofocus: true`
+> didn't work either since the enclosing scope already had a focused child from initial app
+> construction — the same class of bug D123 already hit once for review mode. Fixed by scheduling
+> the request from inside `_NotificationPanelState.initState()` itself, mirroring D123's own fix
+> exactly. `flutter analyze` clean, `flutter test` 233/233 minus D114's same pre-existing,
+> unrelated `shell_layout_test.dart` failure (reconfirmed via `git stash` on the unmodified branch
+> tip before any edits). `flutter build windows --debug` succeeds. Built, the stale prior instance
+> killed, and started fresh for you per rule 5. **Your checkpoint test**: Escape closes the
+> notification panel and returns focus to the bell; Tab inside an open panel never reaches
+> something behind it; the title bar's window buttons show tooltips on hover; the library grid's
+> tiles show a click cursor on hover; Settings → Appearance → Reduce motion → Always (or Windows'
+> own "Show animations: Off") makes keyboard-driven scrolling in the library grid, review mode's
+> filmstrip, and the log console search jump instantly instead of animating. Full account in
+> DECISIONS.md's D125.
+>
+> **2026-08-11, same branch, not v2 work — a live bug fix (D126).** You reported `gender_valid`/
+> `gender_invalid` showing 0 in the Library screen despite one real entity (189/286 files) sitting
+> in each. Root-caused agent-side, not in the Flutter app: `LibraryCounts`' cache (CP 5.1) is kept
+> current by a filesystem watcher that recomputes exactly the `(folder, root)` pair a change
+> touches — but `entity_classify` moving a whole batch of files into both directories at once
+> appears to overflow Windows' change-notification buffer for that specific directory, after which
+> its watch goes silent permanently rather than just dropping one coalesced event (confirmed live
+> by probing several folders directly: `scanned`/`scraped` kept picking up new files, `gender_valid`/
+> `gender_invalid` did not, at all, for over 10 seconds). Fixed with a periodic reseed running
+> alongside the existing touch-driven watcher (`library/watcher.py`'s new `_periodic_reseed`,
+> every 5 minutes) — cheap (`seed()` measured ~15ms over the real `IA_DIR`, D35) and independent of
+> whatever specifically breaks a given directory's watch. `agent/tests/test_library.py` grew from
+> 82 to 87 checks (87/87). Verified live: agent restarted (`taskkill /F /IM ia-agent.exe`, launcher
+> respawned it, all three supervised services stayed `supervised`/`adopted`), `GET
+> /api/library/folders` immediately showed the real counts. Full account in DECISIONS.md's D126.
+>
 > **Scope boundary: v2 is entirely inside `app/`.** No agent, pipeline, helm or mobile
 > changes; no redeploys; no cross-repo branches. Every piece of data the redesign needs is
 > already served by an existing endpoint. If a checkpoint seems to need an agent change, it

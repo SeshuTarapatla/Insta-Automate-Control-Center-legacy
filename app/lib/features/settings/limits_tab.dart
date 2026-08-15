@@ -33,8 +33,9 @@ class _LimitsTabState extends ConsumerState<LimitsTab> {
     if (key == null) return;
     final target = _cardKeys[key]?.currentContext;
     if (target == null) return;
+    final duration = Theme.of(context).tokens.motion.reduced ? Duration.zero : const Duration(milliseconds: 250);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      Scrollable.ensureVisible(target, duration: const Duration(milliseconds: 250), alignment: 0.5);
+      Scrollable.ensureVisible(target, duration: duration, alignment: 0.5);
     });
   }
 

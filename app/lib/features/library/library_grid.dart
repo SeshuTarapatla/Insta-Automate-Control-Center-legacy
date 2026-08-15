@@ -66,12 +66,13 @@ class _LibraryGridState extends ConsumerState<LibraryGrid> {
     final bottom = top + rowStep - _spacing;
     final viewTop = _scrollController.offset;
     final viewBottom = viewTop + _scrollController.position.viewportDimension;
+    final duration = Theme.of(context).tokens.motion.reduced ? Duration.zero : const Duration(milliseconds: 120);
     if (top < viewTop) {
-      _scrollController.animateTo(top, duration: const Duration(milliseconds: 120), curve: Curves.easeOut);
+      _scrollController.animateTo(top, duration: duration, curve: Curves.easeOut);
     } else if (bottom > viewBottom) {
       _scrollController.animateTo(
         bottom - _scrollController.position.viewportDimension,
-        duration: const Duration(milliseconds: 120),
+        duration: duration,
         curve: Curves.easeOut,
       );
     }

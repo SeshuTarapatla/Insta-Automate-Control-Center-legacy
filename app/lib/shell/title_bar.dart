@@ -220,21 +220,23 @@ class _WindowButtonsState extends State<_WindowButtons> with WindowListener {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        _WindowButton(glyph: AppIcons.windowMinimize, onPressed: windowManager.minimize),
+        _WindowButton(glyph: AppIcons.windowMinimize, tooltip: 'Minimize', onPressed: windowManager.minimize),
         _WindowButton(
           glyph: _maximized ? AppIcons.windowRestore : AppIcons.windowMaximize,
+          tooltip: _maximized ? 'Restore' : 'Maximize',
           onPressed: _toggle,
         ),
-        _WindowButton(glyph: AppIcons.windowClose, onPressed: windowManager.close),
+        _WindowButton(glyph: AppIcons.windowClose, tooltip: 'Close', onPressed: windowManager.close),
       ],
     );
   }
 }
 
 class _WindowButton extends StatelessWidget {
-  const _WindowButton({required this.glyph, required this.onPressed});
+  const _WindowButton({required this.glyph, required this.tooltip, required this.onPressed});
 
   final PhosphorIconData Function(PhosphorIconsStyle) glyph;
+  final String tooltip;
   final Future<void> Function() onPressed;
 
   @override
@@ -242,7 +244,12 @@ class _WindowButton extends StatelessWidget {
     return SizedBox(
       width: 40,
       height: 40,
-      child: IconButton(iconSize: 16, icon: AppIcon(glyph, size: IconSize.sm), onPressed: onPressed),
+      child: IconButton(
+        tooltip: tooltip,
+        iconSize: 16,
+        icon: AppIcon(glyph, size: IconSize.sm),
+        onPressed: onPressed,
+      ),
     );
   }
 }

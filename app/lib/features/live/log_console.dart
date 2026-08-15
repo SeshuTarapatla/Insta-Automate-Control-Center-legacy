@@ -104,10 +104,11 @@ class _LogConsoleState extends ConsumerState<LogConsole> {
     if (!_scroll.hasClients || totalEntries <= 1) return;
     final estimate = _scroll.position.maxScrollExtent * (entryIndex / (totalEntries - 1));
     _scroll.jumpTo(estimate.clamp(0, _scroll.position.maxScrollExtent));
+    final duration = Theme.of(context).tokens.motion.reduced ? Duration.zero : const Duration(milliseconds: 150);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (entryIndex >= _itemKeys.length) return;
-      final context = _itemKeys[entryIndex].currentContext;
-      if (context != null) Scrollable.ensureVisible(context, alignment: 0.3, duration: const Duration(milliseconds: 150));
+      final itemContext = _itemKeys[entryIndex].currentContext;
+      if (itemContext != null) Scrollable.ensureVisible(itemContext, alignment: 0.3, duration: duration);
     });
   }
 

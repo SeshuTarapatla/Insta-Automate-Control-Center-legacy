@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:phosphor_flutter/phosphor_flutter.dart';
@@ -27,16 +28,25 @@ class NotificationCenter extends ConsumerStatefulWidget {
 
 class _NotificationCenterState extends ConsumerState<NotificationCenter> {
   final _link = LayerLink();
+  final _bellFocusNode = FocusNode(debugLabel: 'notification bell');
+  final _panelFocusScope = FocusScopeNode(debugLabel: 'notification panel');
   OverlayEntry? _entry;
 
   @override
   void dispose() {
     _entry?.remove();
+    _bellFocusNode.dispose();
+    _panelFocusScope.dispose();
     super.dispose();
   }
 
   void _toggle() => _entry == null ? _open() : _close();
 
+  // DESIGN_SYSTEM §6's "every dialog traps and restore focus" applies here
+  // too, even though this is a popover, not a `showDialog` route (which
+  // would get that for free) — `Overlay`/`CompositedTransformFollower` was
+  // the deliberate choice (see the class doc) for anchoring, so focus has to
+  // be trapped and restored by hand.
   void _open() {
     final overlay = Overlay.of(context);
     _entry = OverlayEntry(
@@ -49,7 +59,19 @@ class _NotificationCenterState extends ConsumerState<NotificationCenter> {
             targetAnchor: Alignment.bottomRight,
             followerAnchor: Alignment.topRight,
             offset: const Offset(0, 8),
-            child: _NotificationPanel(onClose: _close),
+            // `Shortcuts`/`Actions` wrap the `FocusScope`, not the other way
+            // round — they only see a key event whose target sits *inside*
+            // their own subtree, and once the panel below lands primary
+            // focus on the scope itself, the focused node's context is the
+            // scope's own, which has to be a descendant of `Shortcuts` to be
+            // caught.
+            child: Shortcuts(
+              shortcuts: {LogicalKeySet(LogicalKeyboardKey.escape): const _CloseIntent()},
+              child: Actions(
+                actions: {_CloseIntent: CallbackAction<_CloseIntent>(onInvoke: (_) => _close())},
+                child: FocusScope(node: _panelFocusScope, child: _NotificationPanel(onClose: _close)),
+              ),
+            ),
           ),
         ],
       ),
@@ -60,6 +82,7 @@ class _NotificationCenterState extends ConsumerState<NotificationCenter> {
   void _close() {
     _entry?.remove();
     _entry = null;
+    _bellFocusNode.requestFocus();
   }
 
   @override
@@ -68,6 +91,7 @@ class _NotificationCenterState extends ConsumerState<NotificationCenter> {
     return CompositedTransformTarget(
       link: _link,
       child: IconButton(
+        focusNode: _bellFocusNode,
         tooltip: 'Notifications',
         onPressed: _toggle,
         icon: Badge(
@@ -80,6 +104,10 @@ class _NotificationCenterState extends ConsumerState<NotificationCenter> {
   }
 }
 
+class _CloseIntent extends Intent {
+  const _CloseIntent();
+}
+
 class _NotificationPanel extends ConsumerStatefulWidget {
   const _NotificationPanel({required this.onClose});
   final VoidCallback onClose;
@@ -90,6 +118,22 @@ class _NotificationPanel extends ConsumerStatefulWidget {
 
 class _NotificationPanelState extends ConsumerState<_NotificationPanel> {
   bool _showFilters = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Scheduled from here, not from `_NotificationCenterState._open()` —
+    // a callback posted from the caller fires at the end of whatever frame
+    // is *already in flight* when `overlay.insert()` runs, which is before
+    // the overlay's own content (this widget) has actually been built for
+    // the first time. Posting it from this widget's own `initState` waits
+    // for the frame after *this* mounts, which is the one that's actually
+    // correct — the same fix D123 already established for review mode's
+    // identical autofocus-timing gap.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) FocusScope.of(context).requestFocus();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {

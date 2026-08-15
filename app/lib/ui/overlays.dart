@@ -77,7 +77,11 @@ class AppTooltip extends StatelessWidget {
           ),
         ),
       ),
-      child: child,
+      // `richMessage` (unlike plain `message`) gives Tooltip nothing it can
+      // stringify into an automatic Semantics label — DESIGN_SYSTEM §6's
+      // "tooltip + Semantics" floor needs it spelled out by hand here so a
+      // screen-reader user gets the same content a mouse-hover would.
+      child: Semantics(label: title == null ? message : '$title. $message', child: child),
     );
   }
 }

@@ -52,14 +52,15 @@ class _ClassifySurfaceState extends State<ClassifySurface> {
     // Unlike scan (newest pinned at the top, no scrolling) — classify
     // streams fast enough that oldest-at-top/scroll-to-follow-the-newest
     // reads more naturally here, matching this surface's original design.
+    final tokens = theme.tokens;
+
     if (verdicts.length != _lastCount) {
       _lastCount = verdicts.length;
+      final duration = tokens.motion.reduced ? Duration.zero : const Duration(milliseconds: 250);
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
+        if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: duration, curve: Curves.easeOut);
       });
     }
-
-    final tokens = theme.tokens;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

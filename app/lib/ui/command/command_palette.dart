@@ -126,10 +126,11 @@ class _CommandPaletteState extends ConsumerState<CommandPalette> {
     }
 
     if (flat.isNotEmpty) {
+      final duration = Theme.of(context).tokens.motion.reduced ? Duration.zero : const Duration(milliseconds: 100);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final rowContext = rowKeys[highlighted].currentContext;
         if (rowContext != null) {
-          Scrollable.ensureVisible(rowContext, duration: const Duration(milliseconds: 100));
+          Scrollable.ensureVisible(rowContext, duration: duration);
         }
       });
     }

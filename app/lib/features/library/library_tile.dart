@@ -80,39 +80,42 @@ class LibraryTile extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final borderColor = selected ? scheme.primary : (focused ? scheme.outline : Colors.transparent);
 
-    return GestureDetector(
-      onTapDown: (_) {
-        onRequestFocus();
-        onPrimaryTap(shift: HardwareKeyboard.instance.isShiftPressed);
-      },
-      onDoubleTap: onOpenLightbox,
-      onSecondaryTapDown: (details) {
-        onRequestFocus();
-        _showMenu(context, details.globalPosition);
-      },
-      child: Container(
-        decoration: BoxDecoration(
-          border: Border.all(color: borderColor, width: selected ? 2.5 : 1),
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LibraryThumbnail(path: entry.path, width: thumbWidth),
-            ),
-            if (selected)
-              Positioned(
-                top: 4,
-                right: 4,
-                child: CircleAvatar(
-                  radius: 9,
-                  backgroundColor: scheme.primary,
-                  child: AppIcon(AppIcons.check, size: IconSize.sm, color: scheme.onPrimary),
-                ),
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTapDown: (_) {
+          onRequestFocus();
+          onPrimaryTap(shift: HardwareKeyboard.instance.isShiftPressed);
+        },
+        onDoubleTap: onOpenLightbox,
+        onSecondaryTapDown: (details) {
+          onRequestFocus();
+          _showMenu(context, details.globalPosition);
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            border: Border.all(color: borderColor, width: selected ? 2.5 : 1),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LibraryThumbnail(path: entry.path, width: thumbWidth),
               ),
-          ],
+              if (selected)
+                Positioned(
+                  top: 4,
+                  right: 4,
+                  child: CircleAvatar(
+                    radius: 9,
+                    backgroundColor: scheme.primary,
+                    child: AppIcon(AppIcons.check, size: IconSize.sm, color: scheme.onPrimary),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );

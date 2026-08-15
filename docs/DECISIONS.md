@@ -5,6 +5,148 @@ session can tell a settled question from an open one.
 
 ---
 
+## 2026-08-11 — Live bug: gender_valid/gender_invalid stuck at 0 in the Library screen (D126)
+
+### D126 · Library counts get a periodic-reseed safety net alongside the existing touch-driven watcher
+
+**Found live:** you reported the Library screen showing 0 for `gender_valid`/`gender_invalid`
+despite one real entity (189 and 286 files respectively) sitting in each on disk. Confirmed via
+direct agent API calls (not the GUI, per rule 5) that `GET /api/library/images` — which reads disk
+live — saw the real files correctly, while `GET /api/library/folders`/`entities` — which reads
+`LibraryCounts`' cache — reported 0. Root-caused by writing harmless probe files into several
+library folders and watching whether the cache picked them up: `scanned` and `scraped` updated
+within seconds as designed; `gender_valid`/`gender_invalid` did not update at all, for either a
+brand-new subdirectory or an existing untracked one, even after 10+ seconds. Not a coalesced-or-
+dropped single event (CP 5.1's `touch()` design already tolerates that — the next real touch of the
+same pair self-corrects it) but the underlying watch for those two directories going completely
+silent, permanently, while sibling folders kept working. The likely trigger: `entity_classify`
+(`Insta-Automate/tasks/ollama.py`) moves a whole batch of files into both directories in one tight
+loop — that burst of rapid renames is a known way to overflow Windows' `ReadDirectoryChangesW`
+change-notification buffer for the specific directory being hammered, and `watchfiles`' Windows
+backend does not appear to self-heal that subtree afterward.
+
+**Chosen:** `library/watcher.py`'s `watch_library` now runs the existing touch-driven `awatch` loop
+(renamed `_watch_changes`, unchanged logic) alongside a new `_periodic_reseed` task — every 5
+minutes (`_RESEED_INTERVAL_SECONDS`, overridable per-call for tests), it calls `counts.seed()`
+again in full, diffs the result against what was cached, and — only on real drift — publishes a
+`library.changes` event so the app's existing full-refetch-on-any-event listener
+(`library_controller.dart`'s `_touchesLibraryChanges`) picks it up with no client-side change
+needed. **Rejected:** trying to detect and specifically recover from the Windows buffer-overflow
+condition itself — `seed()` is already measured at ~15ms over the real 7,655-file `IA_DIR` (D35),
+so a plain interval is both simpler and more robust than chasing a platform-specific failure mode
+that may not be the only way a watch can go silent.
+
+**Verified:** `agent/tests/test_library.py` grew from 82 to 87 checks — two new cases simulate a
+dead watch by writing straight to disk (bypassing `counts.touch()` the way a real dead watch
+would) and confirm the periodic reseed both republishes the correct total and repairs the cache
+itself, plus a case confirming no spurious publish when nothing actually drifted. All 87 pass.
+Live-verified against the real agent: restarted (`taskkill /F /IM ia-agent.exe`, the launcher
+respawned it in ~8s, all three supervised services confirmed still `supervised`/`adopted` — not
+`external` — across the restart, same as every prior restart in this project's history) —
+`GET /api/library/folders` immediately showed the real counts (`gender_valid: 189/1`,
+`gender_invalid: 286/1`), fixing the reported symptom. The periodic-reseed path itself (catching a
+*future* silent watch failure without a restart) is proven at the unit level via the shortened-
+interval test above, not re-triggered live against a real Windows buffer overflow — that would mean
+deliberately reproducing a race, not something worth forcing against real pipeline data.
+
+**Scope note:** this is an agent-side fix, not v2 work — v2 is `app/`-only per CLAUDE.md's own
+scope boundary, and nothing here touches `app/`. Recorded here rather than folded into any V2
+checkpoint.
+
+---
+
+## 2026-08-11 — V2.13.1/V2.13.2/V2.13.3 accepted by your own call; V2.14's motion/accessibility half built (D125)
+
+### D125 · V2.13 accepted without a separate live pass; V2.14 split into motion/accessibility (done) and release (not started)
+
+**Chosen:** you confirmed V2.13.1 (Device identity), V2.13.2 (Library review mode refinements) and
+V2.13.3 (Dashboard & shell fixes) as done and tested by your own explicit call, the same standing
+precedent as CP 7.3's partial-pass acceptance and Phase 2/5's outright acceptances — not a Claude-run
+test, since rule 5 forbids that categorically. V2.13.1's device-model-caching half stays genuinely
+unverified against a real device (the phone is still disconnected, D116) but that's now the user's
+call to accept, not a gate Claude can hold open.
+
+**V2.14 was then split rather than attempted whole.** PLAN_V2.md's own V2.14 scope is three
+unrelated pieces — motion audit, accessibility floor, and the release mechanics (version bump, tag,
+ARCHITECTURE.md update, a full live pass in three themes). Only the first two make sense for Claude
+to build blind: they're auditable from source (DESIGN_SYSTEM §1.9/§6's own checklists) and testable
+headless (`flutter test`), where release's own checkpoint test is explicitly "a full pass over every
+screen in at least three themes... at the real window size" — exactly the live-driving rule 5
+forbids. **Release stays unstarted**, including the `pubspec.yaml` version bump and the `v2.0.0` tag
+— PLAN_V2.md is explicit those land at the very end, not before its own checkpoint test, and rule 4
+already forbids building ahead of an untested checkpoint once; doing the same to V2.14's own last
+third would repeat exactly what that rule exists to prevent.
+
+**Motion audit.** `MotionTokens`/`motion.reduced` (with a real Settings → Appearance override,
+`ReduceMotionSetting.always/never/auto`, reading `MediaQuery.disableAnimations` under `auto`) was
+already fully wired from V2.4 — nothing to add there. The actual gap: six `ScrollController.animateTo`/
+`Scrollable.ensureVisible` calls across `library_grid.dart`, `review_page.dart`, `log_console.dart`,
+`classify_surface.dart`, `limits_tab.dart` and `command_palette.dart` used bare hardcoded
+`Duration`s that never checked `tokens.motion.reduced` at all — every one now resolves to
+`Duration.zero` (an instant jump, not a skipped scroll — `ScrollPosition.animateTo` already treats
+zero as `jumpTo` internally) under reduced motion. `FunnelChart`'s draw-in and `_Shimmer`'s loading
+breathe were already correctly gated; `StatusDot`'s pulse stays deliberately untouched per
+DESIGN_SYSTEM §1.9's own "anything that repeats forever must mean still in progress" exemption.
+
+**Accessibility floor.** Four real gaps, not a rewrite: the title bar's minimize/maximize/close
+buttons (`shell/title_bar.dart`'s `_WindowButton`) had no `tooltip` at all — a screen-reader user had
+no way to know what they did; fixed with per-action tooltips. `AppTooltip`'s `rich: true` path (the
+D93 flow mechanism/gate tooltip and six other call sites) builds its message as a `richMessage`
+`WidgetSpan`, which Flutter's `Tooltip` can't auto-stringify into a `Semantics` label the way it does
+for a plain `message:` string — fixed once at the shared component with an explicit `Semantics(label:)`
+wrap, covering every `rich: true` call site instead of seven individual patches. The library grid's
+image tiles (`library_tile.dart`) had a bare `GestureDetector` with no `MouseRegion` cursor, unlike
+every other clickable surface in the app (`AppPanel`, `AppMenu`'s trigger, the resize handle,
+`_ThemeCard`, `surface_common.dart`'s result cards all already set one) — fixed with
+`SystemMouseCursors.click`. The search field's clear `IconButton` (`ui/fields.dart`) had no tooltip —
+fixed. And `notification_center.dart`'s bell/panel — an `Overlay`/`CompositedTransformFollower`
+popover, not a `showDialog` route, so it gets none of `showDialog`'s free focus trap/restore — had
+neither: Tab could escape into whatever sat behind the translucent barrier, and closing left focus
+wherever it happened to land rather than back on the bell. Fixed with a `FocusScope` wrapping the
+panel (`Shortcuts`/`Actions` deliberately wrap *outside* the `FocusScope`, not inside — they only
+catch a key event whose focused target is a descendant of their own subtree, and the scope itself
+becomes that target once nothing more specific inside claims it) and an explicit `Esc` binding.
+**Getting the focus-claim timing right took two wrong turns, both real, both caught by a new
+regression test before being trusted, not assumed correct:** a `FocusScopeNode.requestFocus()`
+called from `_NotificationCenterState._open()` right after `overlay.insert()` fired too early — that
+callback runs at the end of whatever frame is *already in flight*, not the later frame that actually
+builds the overlay's content, so the request landed on a scope with no attached widget yet and was
+silently lost (confirmed via `WidgetsBinding.instance.focusManager.primaryFocus` in the failing test —
+it stayed on `MaterialApp`'s own root modal scope). Switching to `FocusScope`'s own `autofocus: true`
+didn't fix it either: `autofocus` only claims focus when its *enclosing* scope has no focused child
+yet, and by the time the panel is inserted, Overlay's shared ancestor scope already resolved one
+during initial app construction — the same "autofocus is conditional, an explicit request isn't"
+class of bug D123 already hit once for review mode's own autofocus. **The actual fix**: schedule the
+`requestFocus()` call from inside `_NotificationPanelState.initState()` itself, not from the caller —
+a callback posted from within the widget being mounted necessarily waits for the frame *after that
+widget's own construction*, which is the first moment its `FocusScope` context actually resolves to
+something real, mirroring D123's own `_LibraryReviewPageState.initState()` fix exactly. New
+`notification_center_layout_test.dart` case (`Esc closes it and returns focus to the bell`) failed
+against both wrong attempts before passing against the real fix.
+
+**Not attempted, deliberately:** a full manual focus-order/traversal audit across every screen (no
+other genuine gaps found by source inspection — `showDialog`'s modal routes already trap/restore
+focus for every real dialog in the app, `IconAction`/`_NavTile`'s collapsed tooltip/`_CollapseToggle`
+already had both tooltip and an implicit `Semantics` from `Tooltip`), and the plan's own "Performance
+check: the library grid scrolling 7,655 thumbnails, the log console at a few thousand lines, Mica
+compositing while the terminal streams" — this needs the real running app under real load, which
+rule 5 puts squarely in your hands, not something source-level review can stand in for.
+
+**Verified:** `flutter analyze` clean. `flutter test` 233 total / 232 passing — the same
+`shell_layout_test.dart` `rail expanded` failure D114 first found, reconfirmed pre-existing and
+unrelated via `git stash` on the unmodified branch tip before any of this session's edits were made
+(same lineage as every prior session's reconfirmation). `flutter build windows --debug` succeeds.
+Built, the stale prior instance (running since the previous session, 2026-08-10) killed, and started
+fresh for you per rule 5.
+
+**Checkpoint test (yours, before this can be called done):** confirm Escape closes the notification
+panel and returns focus to the bell (`Tab` afterward should move on from the bell, not re-enter the
+panel); confirm Tab inside an open notification panel never reaches something behind it; confirm the
+title bar's minimize/maximize/close buttons show a tooltip on hover; confirm the library grid's image
+tiles show a pointer/click cursor on hover; confirm turning on Windows' "Show animations: Off" (or
+Settings → Appearance → Reduce motion → Always) makes keyboard-driven scrolling in the library grid,
+review mode's filmstrip, and the log console search jump instantly instead of animating.
+
 ## 2026-08-10 — V2.13.3 (Dashboard & shell fixes) built, app-only, awaiting your checkpoint test (D124)
 
 ### D124 · Caps tile stops trusting a frozen heartbeat; nav rail toggle's whole row is now the hit target; StatusChip bumped and made ellipsis-safe; "This machine" → "Host"

@@ -113,6 +113,7 @@ class _SearchFieldState extends State<SearchField> {
         suffixIcon: _controller.text.isEmpty
             ? null
             : IconButton(
+                tooltip: 'Clear search (Esc)',
                 icon: Icon(Icons.close, size: tokens.space.iconSm),
                 onPressed: _clear,
                 visualDensity: VisualDensity.compact,

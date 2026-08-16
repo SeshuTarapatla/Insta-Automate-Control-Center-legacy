@@ -1,10 +1,21 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:phosphor_flutter/phosphor_flutter.dart';
 
 import 'package:ia_control_center/core/notification_models.dart';
 import 'package:ia_control_center/features/notifications/notification_center.dart';
 import 'package:ia_control_center/features/notifications/notification_controller.dart';
+import 'package:ia_control_center/ui/icons.dart';
+
+// AppIcon resolves through Phosphor now, not Material `Icons.*` — every
+// finder below needs the exact glyph+weight `AppIcon` renders. The bare
+// `ThemeData(...)` these tests build has no `AppTokens` registered, so
+// `AppTokensX.tokens` falls back to `buildClassicTokens()` (D99), whose
+// `typography.iconWeight` is `PhosphorIconsStyle.regular` — matched explicitly
+// here rather than assumed.
+const _iconWeight = PhosphorIconsStyle.regular;
 
 /// Overflow is a paint-time error `flutter analyze` is blind to (D19's
 /// precedent). The real risk here is an unbounded `msg` string (pipeline
@@ -86,11 +97,11 @@ void main() {
     // right after an overlay entry is inserted; the tap itself still reaches
     // the real button (the FilterChip assertion below confirms the row
     // actually opened, so this isn't masking a real mis-tap).
-    await tester.tap(find.byIcon(Icons.notifications_outlined), warnIfMissed: false);
+    await tester.tap(find.byIcon(AppIcons.notification(_iconWeight)), warnIfMissed: false);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    await tester.tap(find.byIcon(Icons.filter_list), warnIfMissed: false);
+    await tester.tap(find.byIcon(AppIcons.filter(_iconWeight)), warnIfMissed: false);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
@@ -133,7 +144,7 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 100));
 
-    await tester.tap(find.byIcon(Icons.notifications_outlined), warnIfMissed: false);
+    await tester.tap(find.byIcon(AppIcons.notification(_iconWeight)), warnIfMissed: false);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
@@ -141,7 +152,7 @@ void main() {
     // been formatted (bold, link syntax stripped) rather than shown as-is.
     expect(find.textContaining('**['), findsNothing);
     expect(find.textContaining('](https'), findsNothing);
-    expect(find.byIcon(Icons.open_in_new_rounded), findsOneWidget);
+    expect(find.byIcon(AppIcons.openExternal(_iconWeight)), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -169,11 +180,55 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 100));
 
-    await tester.tap(find.byIcon(Icons.notifications_outlined), warnIfMissed: false);
+    await tester.tap(find.byIcon(AppIcons.notification(_iconWeight)), warnIfMissed: false);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('Every notification here is muted.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Notification panel: Esc closes it and returns focus to the bell', (tester) async {
+    tester.view.physicalSize = const Size(1920, 1080);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          notificationControllerProvider.overrideWith(
+            () => _FakeNotificationController([_notification(id: '1', seq: 1, msg: 'hello')]),
+          ),
+          mutedTagsControllerProvider.overrideWith(() => _FakeMutedTagsController(const {})),
+        ],
+        child: MaterialApp(
+          theme: ThemeData(useMaterial3: true, brightness: Brightness.dark),
+          home: const Scaffold(body: Align(alignment: Alignment.topRight, child: NotificationCenter())),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.byIcon(AppIcons.notification(_iconWeight)), warnIfMissed: false);
+    await tester.pump();
+    // Lets the post-frame callback that traps focus into the panel actually
+    // run — without it the scope is never attached when `requestFocus()` is
+    // called, which is exactly the bug this defers around (mirrors D123's
+    // review-mode autofocus fix).
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('Mark all read'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('Mark all read'), findsNothing);
+    // The overlay is gone by now, so the bell is the only `IconButton` left
+    // in the tree.
+    final bellButton = tester.widget<IconButton>(find.byType(IconButton));
+    expect(bellButton.focusNode?.hasFocus, isTrue);
     expect(tester.takeException(), isNull);
   });
 }

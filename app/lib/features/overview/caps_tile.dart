@@ -1,0 +1,156 @@
+// SCREENS.md §1 — "caps become bars + sparklines, not five 340px `fl_chart`
+// cards." A cap is a ratio-to-a-limit; a progress bar says that in 24px of
+// height where a bar chart takes 200. The 7-day `Sparkline` (COMPONENTS §10)
+// keeps the trend signal; the full `fl_chart` history stays on Insights, one
+// click away (`SectionHeader.navIndex`).
+import 'package:flutter/material.dart';
+
+import '../../core/insights_models.dart';
+import '../../core/scheduler_models.dart';
+import '../../core/theme/tokens.dart';
+import '../../ui/data.dart';
+import '../../ui/status.dart';
+import '../../ui/text.dart';
+
+/// `BurndownDay.date` is a Postgres `date` column serialized with Python's
+/// `date.isoformat()` (agent's `insights.py::_iso`) — always `YYYY-MM-DD`,
+/// so a plain local-clock format matches it without needing `intl`.
+String _todayKey() {
+  final now = DateTime.now();
+  String pad2(int n) => n.toString().padLeft(2, '0');
+  return '${now.year}-${pad2(now.month)}-${pad2(now.day)}';
+}
+
+class _CapRow {
+  const _CapRow({required this.label, required this.field, required this.days, required this.limit, this.live});
+  final String label;
+  final String field;
+  final List<BurndownDay> days;
+  final int? limit;
+
+  /// The owning flow's live `today` map from the scheduler heartbeat
+  /// (`flows.state`, pushed every ~2s) — see the module doc comment below
+  /// for why this, not `days.last`, is what "today" should read from.
+  final Map<String, dynamic>? live;
+}
+
+class CapsTile extends StatelessWidget {
+  const CapsTile({super.key, required this.burndown, this.liveFlows});
+
+  final Burndown burndown;
+
+  /// `flowsControllerProvider`'s current snapshot, keyed by flow name — kept
+  /// current by WS `flows.state` broadcasts, unlike [burndown] itself (a
+  /// plain `FutureProvider`, fetched once per app session and never
+  /// invalidated automatically). Today's bar/count reads from here whenever
+  /// it's available; found live 2026-08-09 (D-pending): the Overview tile
+  /// could sit open all day showing e.g. "200/300" from whenever it first
+  /// loaded while a same-page live notification already said "reached 300",
+  /// an outright contradiction on one screen. History (the sparkline) is
+  /// still fine coming from [burndown] — past days never change once the
+  /// calendar day rolls over.
+  final Map<String, FlowState>? liveFlows;
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = [
+      _CapRow(
+        label: 'Scan · profiles',
+        field: 'profiles',
+        days: burndown.scan,
+        limit: burndown.limits['profiles'],
+        live: liveFlows?['entity-scan']?.today,
+      ),
+      _CapRow(
+        label: 'Scan · reels',
+        field: 'reels',
+        days: burndown.scan,
+        limit: burndown.limits['reels'],
+        live: liveFlows?['entity-scan']?.today,
+      ),
+      _CapRow(
+        label: 'Scan · posts',
+        field: 'posts',
+        days: burndown.scan,
+        limit: burndown.limits['posts'],
+        live: liveFlows?['entity-scan']?.today,
+      ),
+      _CapRow(
+        label: 'Scrape',
+        field: 'scraped',
+        days: burndown.scrape,
+        limit: burndown.limits['scrape'],
+        live: liveFlows?['entity-scrape']?.today,
+      ),
+      _CapRow(
+        label: 'Follow',
+        field: 'followed',
+        days: burndown.follow,
+        limit: burndown.limits['follow'],
+        live: liveFlows?['entity-follow']?.today,
+      ),
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [for (final row in rows) _CapBar(row: row)],
+    );
+  }
+}
+
+class _CapBar extends StatelessWidget {
+  const _CapBar({required this.row});
+
+  final _CapRow row;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = theme.tokens;
+    final liveToday = (row.live?[row.field] as num?)?.toInt();
+    // The burndown fallback is a once-per-session snapshot (see the class
+    // doc comment above) — its last entry is only really "today" if the
+    // calendar day hasn't rolled over since it was fetched. Once it has,
+    // that entry is yesterday's real total, and showing it unlabelled as
+    // today's count is exactly the frozen-numbers bug this tile shipped
+    // with (D121/V2.13.3) — a new day with no live data yet reads as 0,
+    // not as whatever the last known day happened to total.
+    final lastDay = row.days.isEmpty ? null : row.days.last;
+    final fallbackToday = lastDay != null && lastDay.date == _todayKey() ? (lastDay.values[row.field] ?? 0) : 0;
+    final today = liveToday ?? fallbackToday;
+    final limit = row.limit;
+    final series = row.days.length <= 7 ? row.days : row.days.sublist(row.days.length - 7);
+    final values = [for (final day in series) day.values[row.field] ?? 0];
+    final fraction = limit == null || limit <= 0 ? 0.0 : (today / limit).clamp(0.0, 1.0);
+    final tone = fraction >= 1.0 ? StatusKind.warn : StatusKind.info;
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: tokens.space.sm),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 92,
+            child: Text(row.label, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall),
+          ),
+          SizedBox(width: tokens.space.sm),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(tokens.geometry.radiusFull),
+              child: LinearProgressIndicator(
+                value: fraction,
+                minHeight: 8,
+                color: tone.fg(tokens),
+                backgroundColor: tokens.surface.sunken,
+              ),
+            ),
+          ),
+          SizedBox(width: tokens.space.sm),
+          NumericText(limit == null ? '$today' : '$today/$limit', role: TextRole.caption),
+          SizedBox(width: tokens.space.sm),
+          Sparkline(values: values, cap: limit, tone: tone),
+        ],
+      ),
+    );
+  }
+}

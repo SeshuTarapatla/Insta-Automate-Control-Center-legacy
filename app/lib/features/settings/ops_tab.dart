@@ -1,4 +1,3 @@
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,10 +5,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/agent_client.dart';
 import '../../core/agent_ws.dart';
 import '../../core/app_snack_bar.dart';
-import '../../core/async_state_view.dart';
-import '../../core/ops_confirm.dart';
+import '../../ui/feedback.dart';
+import '../../core/ops_actions.dart';
 import '../../core/ops_models.dart';
 import '../../core/relative_time.dart';
+import '../../core/theme/tokens.dart';
+import '../../ui/data.dart';
+import '../../ui/icons.dart';
+import '../../ui/layout.dart';
+import '../../ui/status.dart';
+import '../../ui/surfaces.dart';
+import '../../ui/text.dart';
+import '../flows/flow_status.dart';
 import '../services/services_controller.dart' show describeAgentError;
 import 'ops_controller.dart';
 
@@ -28,23 +35,12 @@ class OpsTab extends ConsumerStatefulWidget {
 class _OpsTabState extends ConsumerState<OpsTab> {
   String? _selectedJobId;
 
+  /// `core/ops_actions.dart` owns the confirm-if-needed/start/error-snackbar
+  /// path (shared with the command palette, V2.12); this only adds picking
+  /// the freshly-started job in the local history view.
   Future<void> _run(OpsJobSpec spec) async {
-    if (spec.confirm) {
-      final confirmed = await confirmOpsAction(context, spec.label, spec.consequence ?? '');
-      if (!confirmed) return;
-    }
-    if (!mounted) return;
-    try {
-      final job = await ref.read(opsJobsControllerProvider.notifier).start(spec.id);
-      if (!mounted) return;
-      setState(() => _selectedJobId = job.id);
-    } on DioException catch (error) {
-      if (!mounted) return;
-      final message = error.response?.statusCode == 409
-          ? 'A job is already running — wait for it to finish first.'
-          : 'Failed to start ${spec.label}: ${describeAgentError(error)}';
-      if (context.mounted) AppSnackBar.show(context, message, isError: true);
-    }
+    final job = await runOpsJob(context, ref, spec);
+    if (job != null && mounted) setState(() => _selectedJobId = job.id);
   }
 
   @override
@@ -64,19 +60,21 @@ class _OpsTabState extends ConsumerState<OpsTab> {
     // and can't re-fire on an unrelated rebuild the way D69's bug did.
     if (_selectedJobId == null && jobs.isNotEmpty) _selectedJobId = jobs.first.id;
 
+    final tokens = theme.tokens;
+
     return Padding(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.all(tokens.space.lg),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text('Ops jobs', style: theme.textTheme.titleMedium),
-          const SizedBox(height: 4),
+          SizedBox(height: tokens.space.xs),
           Text(
             'Build, deploy, backup and restart actions run as real commands against the live '
             'cluster, with output streamed below.',
-            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            style: theme.textTheme.bodySmall?.copyWith(color: tokens.content.secondary),
           ),
-          const SizedBox(height: 16),
+          SizedBox(height: tokens.space.lg),
           // Capped and independently scrollable rather than left to size
           // itself: the real registry is ten jobs, several rows of cards at
           // this tab's minimum width — letting the `Wrap` claim whatever
@@ -87,15 +85,12 @@ class _OpsTabState extends ConsumerState<OpsTab> {
           ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 190),
             child: SingleChildScrollView(
-              child: specsAsync.when(
-                loading: () => const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 16),
-                  child: Center(child: CircularProgressIndicator()),
-                ),
-                error: (error, _) => Text('Failed to load job list: $error'),
+              child: specsAsync.stateView(
+                describeError: (error) => 'Failed to load job list: $error',
+                onRetry: () => ref.invalidate(opsSpecsProvider),
                 data: (specs) => Wrap(
-                  spacing: 10,
-                  runSpacing: 10,
+                  spacing: tokens.space.sm,
+                  runSpacing: tokens.space.sm,
                   children: [
                     for (final spec in specs)
                       _JobButton(spec: spec, busy: runningId != null, onPressed: () => _run(spec)),
@@ -104,13 +99,13 @@ class _OpsTabState extends ConsumerState<OpsTab> {
               ),
             ),
           ),
-          const SizedBox(height: 20),
+          SizedBox(height: tokens.space.xl),
           Expanded(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Expanded(child: _OpsLogPanel(jobId: _selectedJobId)),
-                const SizedBox(width: 16),
+                SizedBox(width: tokens.space.lg),
                 SizedBox(
                   width: 280,
                   child: _JobHistory(
@@ -140,45 +135,71 @@ class _JobButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
 
     return SizedBox(
       width: 260,
-      child: Card(
-        margin: EdgeInsets.zero,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: busy ? null : onPressed,
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: AppCard(
+        onTap: busy ? null : onPressed,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                Row(
-                  children: [
-                    Icon(
-                      spec.confirm ? Icons.warning_amber_rounded : Icons.play_arrow_rounded,
-                      size: 18,
-                      color: spec.confirm ? scheme.error : scheme.primary,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(spec.label, style: theme.textTheme.titleSmall, overflow: TextOverflow.ellipsis),
-                    ),
-                  ],
+                AppIcon(
+                  spec.confirm ? AppIcons.warning : AppIcons.trigger,
+                  size: IconSize.sm,
+                  color: spec.confirm ? scheme.error : scheme.primary,
                 ),
-                const SizedBox(height: 6),
-                Text(
-                  spec.description,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                SizedBox(width: tokens.space.xs),
+                Expanded(
+                  child: Text(spec.label, style: theme.textTheme.titleSmall, overflow: TextOverflow.ellipsis),
                 ),
               ],
             ),
-          ),
+            SizedBox(height: tokens.space.xs),
+            Text(
+              spec.description,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(color: tokens.content.secondary),
+            ),
+          ],
         ),
       ),
     );
+  }
+}
+
+// The sidebar this table sits in is a fixed 280 px, ~250 px once the table's
+// own row padding is subtracted — real overflow found by `ops_layout_test.dart`,
+// not by writing this list. Four columns at readable widths don't fit that;
+// "Started" and "Elapsed" share one narrow column (`_WhenCell`, two stacked
+// lines) rather than dropping either piece of information.
+List<AppTableColumn<OpsJob>> _jobHistoryColumns() => [
+  AppTableColumn<OpsJob>(label: '', width: 28, cell: (job) => _StatusCell(status: job.status)),
+  AppTableColumn<OpsJob>(label: 'Job', cell: (job) => Text(job.label, maxLines: 1, overflow: TextOverflow.ellipsis)),
+  AppTableColumn<OpsJob>(label: 'When', width: 84, cell: (job) => _WhenCell(job: job)),
+];
+
+/// A small widget rather than a bare glyph/color function, since resolving
+/// `StatusKind.fg` needs the ambient theme — `AppTableColumn.cell` only gets
+/// the row, not a `BuildContext`.
+class _StatusCell extends StatelessWidget {
+  const _StatusCell({required this.status});
+
+  final OpsJobStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).tokens;
+    final (glyph, kind) = switch (status) {
+      OpsJobStatus.running => (AppIcons.sync, StatusKind.info),
+      OpsJobStatus.succeeded => (AppIcons.success, StatusKind.good),
+      OpsJobStatus.failed => (AppIcons.error, StatusKind.bad),
+      OpsJobStatus.interrupted => (AppIcons.linkOff, StatusKind.neutral),
+    };
+    return AppIcon(glyph, size: IconSize.sm, color: kind.fg(tokens));
   }
 }
 
@@ -193,43 +214,30 @@ class _JobHistory extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant),
-      ),
-      clipBehavior: Clip.antiAlias,
+    return AppPanel(
+      level: SurfaceLevel.raised,
+      padding: EdgeInsets.zero,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
-            child: Text('History', style: theme.textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
+            padding: EdgeInsets.fromLTRB(tokens.space.md, tokens.space.sm, tokens.space.md, tokens.space.xs),
+            child: Text('History', style: theme.textTheme.labelLarge?.copyWith(color: tokens.content.secondary)),
           ),
-          const Divider(height: 1),
+          const AppDivider(),
           Expanded(
             child: loading
-                ? const Center(child: CircularProgressIndicator())
-                : jobs.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Text(
-                        'No jobs run yet.',
-                        textAlign: TextAlign.center,
-                        style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-                      ),
+                ? const LoadingView()
+                : SingleChildScrollView(
+                    child: AppTable<OpsJob>(
+                      columns: _jobHistoryColumns(),
+                      rows: jobs,
+                      onRowTap: (job) => onSelect(job.id),
+                      isSelected: (job) => job.id == selectedId,
+                      emptyState: const EmptyView(icon: Icons.history_toggle_off, title: 'No jobs run yet.'),
                     ),
-                  )
-                : ListView.builder(
-                    itemCount: jobs.length,
-                    itemBuilder: (context, index) {
-                      final job = jobs[index];
-                      return _JobHistoryTile(job: job, selected: job.id == selectedId, onTap: () => onSelect(job.id));
-                    },
                   ),
           ),
         ],
@@ -238,50 +246,39 @@ class _JobHistory extends StatelessWidget {
   }
 }
 
-class _JobHistoryTile extends StatelessWidget {
-  const _JobHistoryTile({required this.job, required this.selected, required this.onTap});
+/// Ticks once a second while its job is `running`, same
+/// `StreamProvider.autoDispose` shape as `run_summary.dart`'s own elapsed
+/// timer — a finished row never rebuilds on the clock.
+final opsTickProvider = StreamProvider.autoDispose<int>(
+  (ref) => Stream<int>.periodic(const Duration(seconds: 1), (tick) => tick),
+);
+
+/// "started 2m ago" over "how long it ran" — both real, neither redundant
+/// with the other once a job is actually running (relative time keeps
+/// moving; elapsed only starts mattering once something is in flight).
+class _WhenCell extends ConsumerWidget {
+  const _WhenCell({required this.job});
 
   final OpsJob job;
-  final bool selected;
-  final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    final (icon, color) = switch (job.status) {
-      OpsJobStatus.running => (Icons.sync, scheme.primary),
-      OpsJobStatus.succeeded => (Icons.check_circle_outline, Colors.green),
-      OpsJobStatus.failed => (Icons.error_outline, scheme.error),
-      OpsJobStatus.interrupted => (Icons.link_off, scheme.onSurfaceVariant),
-    };
-
-    return Material(
-      color: selected ? scheme.primaryContainer.withValues(alpha: 0.4) : Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Row(
-            children: [
-              Icon(icon, size: 16, color: color),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(job.label, style: theme.textTheme.bodyMedium, overflow: TextOverflow.ellipsis),
-                    Text(
-                      relativeTime(job.startedAt),
-                      style: theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (job.status == OpsJobStatus.running) ref.watch(opsTickProvider);
+    final tokens = Theme.of(context).tokens;
+    final end = job.endedAt ?? DateTime.now().toUtc();
+    final elapsed = end.toUtc().difference(job.startedAt.toUtc());
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          relativeTime(job.startedAt),
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(color: tokens.content.secondary),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
         ),
-      ),
+        NumericText(formatFlowCountdown(elapsed), role: TextRole.caption),
+      ],
     );
   }
 }
@@ -408,19 +405,14 @@ class _OpsLogPanelState extends ConsumerState<_OpsLogPanel> {
     });
 
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant),
-      ),
-      clipBehavior: Clip.antiAlias,
+    return AppPanel(
+      level: SurfaceLevel.raised,
+      padding: EdgeInsets.zero,
       child: Column(
         children: [
           _header(theme),
-          const Divider(height: 1),
+          const AppDivider(),
           Expanded(child: _body()),
         ],
       ),
@@ -428,22 +420,22 @@ class _OpsLogPanelState extends ConsumerState<_OpsLogPanel> {
   }
 
   Widget _header(ThemeData theme) {
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
     return Container(
-      height: 36,
-      padding: const EdgeInsets.only(left: 12, right: 6),
+      height: tokens.space.rowHeight,
+      padding: EdgeInsets.only(left: tokens.space.md, right: tokens.space.xs),
       child: Row(
         children: [
-          Icon(Icons.terminal, size: 14, color: scheme.onSurfaceVariant),
-          const SizedBox(width: 6),
-          Text('Output', style: theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant)),
+          AppIcon(AppIcons.terminal, size: IconSize.sm, color: tokens.content.secondary),
+          SizedBox(width: tokens.space.xs),
+          Text('Output', style: theme.textTheme.labelSmall?.copyWith(color: tokens.content.secondary)),
           const Spacer(),
           IconButton(
-            iconSize: 16,
+            iconSize: tokens.space.iconSm,
             visualDensity: VisualDensity.compact,
             tooltip: 'Copy log output',
             onPressed: _entries.isEmpty ? null : _copyAll,
-            icon: const Icon(Icons.content_copy_outlined),
+            icon: AppIcon(AppIcons.copy, size: IconSize.sm),
           ),
         ],
       ),
@@ -477,7 +469,7 @@ class _OpsLogPanelState extends ConsumerState<_OpsLogPanel> {
 
     return ListView.builder(
       controller: _scroll,
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.all(Theme.of(context).tokens.space.md),
       itemCount: _entries.length,
       itemBuilder: (context, index) => _OpsLogLine(entry: _entries[index]),
     );
@@ -498,19 +490,18 @@ class _OpsLogLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
     final isStep = entry.kind == 'step';
     final isError = entry.kind == 'error';
-    final color = isError ? scheme.error : (isStep ? scheme.primary : scheme.onSurface);
+    final color = isError ? scheme.error : (isStep ? scheme.primary : null);
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Text(
+      padding: EdgeInsets.only(bottom: tokens.space.xs),
+      child: MonoText(
         entry.text,
-        style: theme.textTheme.bodySmall?.copyWith(
-          fontFamily: 'Consolas',
-          color: color,
-          fontWeight: isStep ? FontWeight.w600 : FontWeight.normal,
-        ),
+        role: TextRole.caption,
+        color: color,
+        ellipsis: false,
       ),
     );
   }

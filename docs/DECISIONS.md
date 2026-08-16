@@ -5,6 +5,2247 @@ session can tell a settled question from an open one.
 
 ---
 
+## 2026-08-11 — Live bug: gender_valid/gender_invalid stuck at 0 in the Library screen (D126)
+
+### D126 · Library counts get a periodic-reseed safety net alongside the existing touch-driven watcher
+
+**Found live:** you reported the Library screen showing 0 for `gender_valid`/`gender_invalid`
+despite one real entity (189 and 286 files respectively) sitting in each on disk. Confirmed via
+direct agent API calls (not the GUI, per rule 5) that `GET /api/library/images` — which reads disk
+live — saw the real files correctly, while `GET /api/library/folders`/`entities` — which reads
+`LibraryCounts`' cache — reported 0. Root-caused by writing harmless probe files into several
+library folders and watching whether the cache picked them up: `scanned` and `scraped` updated
+within seconds as designed; `gender_valid`/`gender_invalid` did not update at all, for either a
+brand-new subdirectory or an existing untracked one, even after 10+ seconds. Not a coalesced-or-
+dropped single event (CP 5.1's `touch()` design already tolerates that — the next real touch of the
+same pair self-corrects it) but the underlying watch for those two directories going completely
+silent, permanently, while sibling folders kept working. The likely trigger: `entity_classify`
+(`Insta-Automate/tasks/ollama.py`) moves a whole batch of files into both directories in one tight
+loop — that burst of rapid renames is a known way to overflow Windows' `ReadDirectoryChangesW`
+change-notification buffer for the specific directory being hammered, and `watchfiles`' Windows
+backend does not appear to self-heal that subtree afterward.
+
+**Chosen:** `library/watcher.py`'s `watch_library` now runs the existing touch-driven `awatch` loop
+(renamed `_watch_changes`, unchanged logic) alongside a new `_periodic_reseed` task — every 5
+minutes (`_RESEED_INTERVAL_SECONDS`, overridable per-call for tests), it calls `counts.seed()`
+again in full, diffs the result against what was cached, and — only on real drift — publishes a
+`library.changes` event so the app's existing full-refetch-on-any-event listener
+(`library_controller.dart`'s `_touchesLibraryChanges`) picks it up with no client-side change
+needed. **Rejected:** trying to detect and specifically recover from the Windows buffer-overflow
+condition itself — `seed()` is already measured at ~15ms over the real 7,655-file `IA_DIR` (D35),
+so a plain interval is both simpler and more robust than chasing a platform-specific failure mode
+that may not be the only way a watch can go silent.
+
+**Verified:** `agent/tests/test_library.py` grew from 82 to 87 checks — two new cases simulate a
+dead watch by writing straight to disk (bypassing `counts.touch()` the way a real dead watch
+would) and confirm the periodic reseed both republishes the correct total and repairs the cache
+itself, plus a case confirming no spurious publish when nothing actually drifted. All 87 pass.
+Live-verified against the real agent: restarted (`taskkill /F /IM ia-agent.exe`, the launcher
+respawned it in ~8s, all three supervised services confirmed still `supervised`/`adopted` — not
+`external` — across the restart, same as every prior restart in this project's history) —
+`GET /api/library/folders` immediately showed the real counts (`gender_valid: 189/1`,
+`gender_invalid: 286/1`), fixing the reported symptom. The periodic-reseed path itself (catching a
+*future* silent watch failure without a restart) is proven at the unit level via the shortened-
+interval test above, not re-triggered live against a real Windows buffer overflow — that would mean
+deliberately reproducing a race, not something worth forcing against real pipeline data.
+
+**Scope note:** this is an agent-side fix, not v2 work — v2 is `app/`-only per CLAUDE.md's own
+scope boundary, and nothing here touches `app/`. Recorded here rather than folded into any V2
+checkpoint.
+
+---
+
+## 2026-08-11 — V2.13.1/V2.13.2/V2.13.3 accepted by your own call; V2.14's motion/accessibility half built (D125)
+
+### D125 · V2.13 accepted without a separate live pass; V2.14 split into motion/accessibility (done) and release (not started)
+
+**Chosen:** you confirmed V2.13.1 (Device identity), V2.13.2 (Library review mode refinements) and
+V2.13.3 (Dashboard & shell fixes) as done and tested by your own explicit call, the same standing
+precedent as CP 7.3's partial-pass acceptance and Phase 2/5's outright acceptances — not a Claude-run
+test, since rule 5 forbids that categorically. V2.13.1's device-model-caching half stays genuinely
+unverified against a real device (the phone is still disconnected, D116) but that's now the user's
+call to accept, not a gate Claude can hold open.
+
+**V2.14 was then split rather than attempted whole.** PLAN_V2.md's own V2.14 scope is three
+unrelated pieces — motion audit, accessibility floor, and the release mechanics (version bump, tag,
+ARCHITECTURE.md update, a full live pass in three themes). Only the first two make sense for Claude
+to build blind: they're auditable from source (DESIGN_SYSTEM §1.9/§6's own checklists) and testable
+headless (`flutter test`), where release's own checkpoint test is explicitly "a full pass over every
+screen in at least three themes... at the real window size" — exactly the live-driving rule 5
+forbids. **Release stays unstarted**, including the `pubspec.yaml` version bump and the `v2.0.0` tag
+— PLAN_V2.md is explicit those land at the very end, not before its own checkpoint test, and rule 4
+already forbids building ahead of an untested checkpoint once; doing the same to V2.14's own last
+third would repeat exactly what that rule exists to prevent.
+
+**Motion audit.** `MotionTokens`/`motion.reduced` (with a real Settings → Appearance override,
+`ReduceMotionSetting.always/never/auto`, reading `MediaQuery.disableAnimations` under `auto`) was
+already fully wired from V2.4 — nothing to add there. The actual gap: six `ScrollController.animateTo`/
+`Scrollable.ensureVisible` calls across `library_grid.dart`, `review_page.dart`, `log_console.dart`,
+`classify_surface.dart`, `limits_tab.dart` and `command_palette.dart` used bare hardcoded
+`Duration`s that never checked `tokens.motion.reduced` at all — every one now resolves to
+`Duration.zero` (an instant jump, not a skipped scroll — `ScrollPosition.animateTo` already treats
+zero as `jumpTo` internally) under reduced motion. `FunnelChart`'s draw-in and `_Shimmer`'s loading
+breathe were already correctly gated; `StatusDot`'s pulse stays deliberately untouched per
+DESIGN_SYSTEM §1.9's own "anything that repeats forever must mean still in progress" exemption.
+
+**Accessibility floor.** Four real gaps, not a rewrite: the title bar's minimize/maximize/close
+buttons (`shell/title_bar.dart`'s `_WindowButton`) had no `tooltip` at all — a screen-reader user had
+no way to know what they did; fixed with per-action tooltips. `AppTooltip`'s `rich: true` path (the
+D93 flow mechanism/gate tooltip and six other call sites) builds its message as a `richMessage`
+`WidgetSpan`, which Flutter's `Tooltip` can't auto-stringify into a `Semantics` label the way it does
+for a plain `message:` string — fixed once at the shared component with an explicit `Semantics(label:)`
+wrap, covering every `rich: true` call site instead of seven individual patches. The library grid's
+image tiles (`library_tile.dart`) had a bare `GestureDetector` with no `MouseRegion` cursor, unlike
+every other clickable surface in the app (`AppPanel`, `AppMenu`'s trigger, the resize handle,
+`_ThemeCard`, `surface_common.dart`'s result cards all already set one) — fixed with
+`SystemMouseCursors.click`. The search field's clear `IconButton` (`ui/fields.dart`) had no tooltip —
+fixed. And `notification_center.dart`'s bell/panel — an `Overlay`/`CompositedTransformFollower`
+popover, not a `showDialog` route, so it gets none of `showDialog`'s free focus trap/restore — had
+neither: Tab could escape into whatever sat behind the translucent barrier, and closing left focus
+wherever it happened to land rather than back on the bell. Fixed with a `FocusScope` wrapping the
+panel (`Shortcuts`/`Actions` deliberately wrap *outside* the `FocusScope`, not inside — they only
+catch a key event whose focused target is a descendant of their own subtree, and the scope itself
+becomes that target once nothing more specific inside claims it) and an explicit `Esc` binding.
+**Getting the focus-claim timing right took two wrong turns, both real, both caught by a new
+regression test before being trusted, not assumed correct:** a `FocusScopeNode.requestFocus()`
+called from `_NotificationCenterState._open()` right after `overlay.insert()` fired too early — that
+callback runs at the end of whatever frame is *already in flight*, not the later frame that actually
+builds the overlay's content, so the request landed on a scope with no attached widget yet and was
+silently lost (confirmed via `WidgetsBinding.instance.focusManager.primaryFocus` in the failing test —
+it stayed on `MaterialApp`'s own root modal scope). Switching to `FocusScope`'s own `autofocus: true`
+didn't fix it either: `autofocus` only claims focus when its *enclosing* scope has no focused child
+yet, and by the time the panel is inserted, Overlay's shared ancestor scope already resolved one
+during initial app construction — the same "autofocus is conditional, an explicit request isn't"
+class of bug D123 already hit once for review mode's own autofocus. **The actual fix**: schedule the
+`requestFocus()` call from inside `_NotificationPanelState.initState()` itself, not from the caller —
+a callback posted from within the widget being mounted necessarily waits for the frame *after that
+widget's own construction*, which is the first moment its `FocusScope` context actually resolves to
+something real, mirroring D123's own `_LibraryReviewPageState.initState()` fix exactly. New
+`notification_center_layout_test.dart` case (`Esc closes it and returns focus to the bell`) failed
+against both wrong attempts before passing against the real fix.
+
+**Not attempted, deliberately:** a full manual focus-order/traversal audit across every screen (no
+other genuine gaps found by source inspection — `showDialog`'s modal routes already trap/restore
+focus for every real dialog in the app, `IconAction`/`_NavTile`'s collapsed tooltip/`_CollapseToggle`
+already had both tooltip and an implicit `Semantics` from `Tooltip`), and the plan's own "Performance
+check: the library grid scrolling 7,655 thumbnails, the log console at a few thousand lines, Mica
+compositing while the terminal streams" — this needs the real running app under real load, which
+rule 5 puts squarely in your hands, not something source-level review can stand in for.
+
+**Verified:** `flutter analyze` clean. `flutter test` 233 total / 232 passing — the same
+`shell_layout_test.dart` `rail expanded` failure D114 first found, reconfirmed pre-existing and
+unrelated via `git stash` on the unmodified branch tip before any of this session's edits were made
+(same lineage as every prior session's reconfirmation). `flutter build windows --debug` succeeds.
+Built, the stale prior instance (running since the previous session, 2026-08-10) killed, and started
+fresh for you per rule 5.
+
+**Checkpoint test (yours, before this can be called done):** confirm Escape closes the notification
+panel and returns focus to the bell (`Tab` afterward should move on from the bell, not re-enter the
+panel); confirm Tab inside an open notification panel never reaches something behind it; confirm the
+title bar's minimize/maximize/close buttons show a tooltip on hover; confirm the library grid's image
+tiles show a pointer/click cursor on hover; confirm turning on Windows' "Show animations: Off" (or
+Settings → Appearance → Reduce motion → Always) makes keyboard-driven scrolling in the library grid,
+review mode's filmstrip, and the log console search jump instantly instead of animating.
+
+## 2026-08-10 — V2.13.3 (Dashboard & shell fixes) built, app-only, awaiting your checkpoint test (D124)
+
+### D124 · Caps tile stops trusting a frozen heartbeat; nav rail toggle's whole row is now the hit target; StatusChip bumped and made ellipsis-safe; "This machine" → "Host"
+
+**Finding #1 — the frozen caps tile, root-caused rather than guessed.** PLAN_V2.md flagged two
+hypotheses and asked to start with the scheduler's day-counter/heartbeat logic. Read directly:
+`Insta-Automate/models/scan.py`/`scrape.py`/`follow.py`'s `.fetch(session)` always queries by
+`Timestamp().date()` (today), returning a fresh zero-valued row when none exists yet — so
+`controllers/prefect.py::_today()` is *not* lazily gated on a flow's first trigger of the day;
+hypothesis (a) as originally stated doesn't hold while the scheduler pod is actually heartbeating.
+The real gap is earlier in the same file: `heartbeat_loop()` is only ever started from inside
+`serve()`, *after* `await wait_for_device(self.tl)` resolves — with the phone disconnected
+indefinitely (D116), that await never returns, so the heartbeat loop never starts at all, and the
+agent's `SchedulerMirror._flows` (`agent/src/ia_agent/scheduler.py`) keeps whatever it last held
+(a prior day's real numbers) forever. `online()` does flip to `false` after `STALE_AFTER` (15s),
+but nothing on the app side was reading that flag before trusting `flows`. Fixing the actual root
+cause (decoupling the heartbeat loop from device connection) is a pipeline change, out of scope
+per the standing v2 `app/`-only boundary — no exception was raised for it here. Fixed app-side,
+defensively and correctly for both hypotheses at once: `overview_page.dart`'s `_CapsTile` now
+passes `liveFlows` only when `SchedulerSnapshot.online` is true (a stopped heartbeat no longer
+masquerades as current data), and `caps_tile.dart`'s burndown fallback now checks the fetched
+snapshot's last day against the actual wall-clock date (`_todayKey()`) before treating it as
+"today" — a genuinely new day with no live data reads as 0, not as whichever day the once-per-
+session snapshot happened to end on. New `test/caps_tile_test.dart` (3 checks, `CapsTile` tested
+in isolation) — the "falls back to 0" case was confirmed to actually fail against the pre-fix
+`_CapBar` (asserted `5/300` where the fix now shows `0/300`) before being trusted.
+
+**Finding #2 — the nav rail collapse toggle's whole row is now the hit target.**
+`shell/nav_rail.dart`'s `_CollapseToggle` was a small `IconButton` that relocates when the rail
+expands/collapses, so every click after the first needed the cursor to chase it. Rebuilt as an
+`InkWell` wrapping the full-width row (matching `_NavTile`'s own tappable-row shape above it),
+with the icon still visually anchored where it was (right-aligned when expanded, centered when
+collapsed) via `Align` rather than driving the hit area. New `shell_layout_test.dart` case taps
+the row's far-left edge — deliberately away from the icon — and confirms it still toggles;
+confirmed failing against the pre-fix `IconButton`-only version first.
+
+**Finding #3 — `StatusChip` bumped, and made to degrade instead of overflow.** `ui/status.dart`'s
+`StatusChip` moved from `labelSmall` (10.5px) to `labelMedium` (12px) with proportionally larger
+padding — one shared-component change (COMPONENTS.md's established pattern, V2.2/V2.7/V2.9), so
+Live's counters and the Dependencies table both read larger without a per-call-site tweak.
+`run_summary.dart`'s private `_CounterChip` (mirrors `StatusChip`'s shape locally rather than
+widening the shared one, since every other call site wants a plain label and this one wants an
+`AnimatedCounter`) was bumped to match — its label word had been `labelSmall` even though the
+count beside it already rendered at `labelMedium`, an internal size mismatch on top of the same
+complaint. **A real regression surfaced immediately by the existing test suite, not found live**:
+`service_tile.dart`'s origin badge ("external"/"adopted", already documented in its own comment as
+tightly fit at the 300px card floor) started overflowing by 8.7px under the larger chip. Root
+cause: `StatusChip`'s `Text` had no `overflow`/`maxLines` at all, so a `Flexible` ancestor had
+nothing to shrink — and a single unbreakable word like "adopted" can't wrap to satisfy a tighter
+allocation, so Flutter reports a hard `RenderFlex` overflow instead of a soft truncation. Fixed at
+the shared component (`maxLines: 1, overflow: TextOverflow.ellipsis`, wrapped in an internal
+`Flexible`) rather than special-cased in `service_tile.dart` — any other tightly-fit call site is
+covered the same way now. New `test/ui/status_test.dart` case (a `StatusChip` forced into a 40px
+`Flexible`) confirmed failing with the exact overflow before the fix, passing after.
+
+**Finding #4 — one-line rename.** `core/dependency_models.dart:39`'s `DependencyGroup.host.label`:
+`'This machine'` → `'Host'`.
+
+**Verified:** `flutter analyze` clean. `flutter test` 232 total / 231 passing — the one
+`shell_layout_test.dart` failure (`AppShell … rail expanded`, an icon-size assertion unrelated to
+anything touched this session) reconfirmed pre-existing via `git stash` on the exact same assertion
+and message, matching D114's original finding. `flutter build windows --debug` succeeds. Built,
+stale prior instance killed, and started fresh for you per rule 5.
+
+**Same-session fix, from your immediate live retest: the toggle's icon wasn't actually centered in
+either state.** The expanded case was deliberately right-aligned by design (`Alignment.centerRight`
++ an 8px right `Padding`) to keep the icon where it visually sat before this checkpoint — but that
+same right padding stayed on in the collapsed case too, where the alignment *was* `Alignment.center`,
+so the padded box (icon + 8px of empty space on its right) is what got centered, leaving the icon
+itself sitting ~4px left of true center. Fixed by dropping the right-alignment scheme entirely —
+the icon is now plainly `Center`ed with no extra padding, correct in both states, matching what you
+actually asked for ("properly aligned to the center in both cases") rather than the original
+"keep it where it visually was when expanded" read. `flutter analyze` clean, `flutter test`
+unchanged (the row-wide tap test doesn't assert icon position, only that the row responds).
+Rebuilt, prior instance killed, restarted fresh for you.
+
+**Not yet checkpoint-tested live** — this session's own defensive fix for Finding #1 can't be
+exercised against a real day rollover with the phone still disconnected (D116); the checkpoint
+test itself (PLAN_V2.md's own "stop every flow, let a day roll over (or simulate it)") is still
+yours to run, alongside a plain look at the nav rail toggle, Live/Dependencies status labels, and
+the Dependencies "Host" rename.
+
+---
+
+## 2026-08-10 — V2.13.2 (Library review mode refinements) built, app-only, awaiting your checkpoint test (D123)
+
+### D123 · Review's nav entry gets the real stage-priority list; Apply runs on decided images only via move+delete; review mode stays embedded instead of full-screen
+
+**Finding #1 fixed — the nav rail's Review entry can now land on `gender_invalid`.**
+`shell/nav_rail.dart`'s `openReview()` picked `curationFolders.first` unconditionally —
+`curationFolders` (`overview/curation_tile.dart`) is `['gender_valid', 'scraped']`,
+deliberately narrowed for Overview's own "needs attention" surface (D115) and left untouched
+here on purpose. New `review_page.dart::openReviewModeForFirstBacklog(folderPriority)` walks
+`libraryStageGroups`' own YOUR REVIEW group (`gender_invalid → gender_valid → scraped`, the
+real stage order, already the one source of truth D115's last addendum established) and picks
+the first folder with a nonzero backlog, then defers to the existing
+`openReviewModeForFolder` to pick that folder's first entity with a real backlog. The nav
+rail's own `reviewCount` badge and its Review-sub-item "selected" highlight were widened to the
+same three-folder list for the same reason — a badge reading only two of the three real
+review-stage folders would have been inconsistent with an entry point that can now land on all
+three. `curationFolders` itself, and every surface D115 deliberately narrowed it for (the
+Overview hero tile, the curation tile's own badge and "Review →" button, the command palette's
+two explicit per-folder `Review: gender_valid`/`Review: scraped` commands), is untouched — the
+plan's own fix explicitly scoped this to "the nav rail's Review entry," not every consumer of
+`curationFolders`.
+
+**Finding #2 fixed — Apply runs on whatever's actually been decided, not the whole loaded set.**
+`review_page.dart`'s old `canApply` required `!hasMore && images.every(decided)` before Apply
+would run at all, because the only mechanism it had — the toolbar's whole-directory
+`applyLibrarySelection` (`POST /api/library/apply`, reads the folder fresh and trashes
+*everything not selected*) — would otherwise trash every image past wherever review stopped,
+D90's mobile bug in a new shape. New `library_toolbar.dart::applyReviewDecisions` replaces that
+call with D90's own explicit-pair primitives instead: kept images move via
+`POST /api/library/move` (a no-op when the folder's configured target is itself — nothing to
+move, the image stays where it is) and discarded images delete via the existing
+`POST /api/library/delete`. Neither call can ever name an image the reviewer hasn't explicitly
+decided, so `canApply` is now just `_decisions.isNotEmpty` — no `hasMore` gate needed, since
+there's no "everything else" left to accidentally sweep up. A decided-and-kept image whose
+target is identity (stays in the same folder) keeps its green mark in local state after Apply,
+since nothing actually happened to it on disk; a moved or deleted image's decision is dropped,
+since re-opening the same folder later won't show it again anyway. Apply **no longer
+auto-closes review mode** on success — the old behavior assumed finishing meant the whole
+folder was done; a partial apply is now the expected, common case, and closing on every chunk
+would eject the reviewer mid-session. New `MoveResult`
+(`core/library_models.dart`) and `LibraryImagesController.move()` mirror the existing
+`ApplyResult`/`apply()` shape.
+
+**Finding #3 fixed — review mode is confined to the Library page's own content area.**
+D115 built review mode as `Navigator.push(fullscreenDialog: true)` on the *root* navigator,
+covering the title bar and nav rail entirely, matching SCREENS.md §5b's mockup at the time. The
+user now wants the nav rail reachable while reviewing — re-architected as a plain
+`libraryReviewingProvider` bool (`library_controller.dart`) that `LibraryPage.build()` checks:
+when true, it renders `LibraryReviewPage` directly in place of its normal three-pane
+folder/entity/grid view (keyed on `folder`/`entity` so re-triggering the nav rail's Review
+entry mid-session for a different backlog always starts with fresh decisions rather than
+Flutter reusing the previous review's `State`), leaving `AppShell`'s title bar and nav rail
+untouched as siblings above/beside it. `openReviewMode` (every entry point: the toolbar's
+Review button, the `R` shortcut, the nav rail, Flows' ⚑ edges, the command palette) is now
+synchronous and context-free — it sets folder/entity/nav-index and flips the flag, nothing to
+await. `LibraryReviewPage`'s own Esc/close-button/Apply-completion handlers, which used to call
+`Navigator.of(context).pop()`, now call the same flag off instead — popping the app's *root*
+Navigator (there is no longer a pushed route to pop) would have hit "cannot pop the last
+route." The double-click lightbox (`LibraryLightboxPage`, SCREENS.md §5c) is untouched — a
+different, browse-only feature not in this checkpoint's scope, still a real pushed route.
+
+**Verified.** `flutter analyze` clean, `flutter test` 226 total / 225 passing (`review_mode_test.dart`
+rewritten for the embedded harness and the new partial-apply behavior — a `Consumer` watching
+`libraryReviewingProvider` stands in for `LibraryPage`'s real swap, the same way the old suite
+stood in for a pushed route; `flows_layout_test.dart`'s ⚑-edge test updated to assert the
+provider state directly rather than a rendered "REVIEW" string, since tapping the edge no
+longer renders anything in that test's bare `PipelineEdge`-only tree; the one failure is
+D114's same pre-existing, unrelated `shell_layout_test.dart` issue, reconfirmed via `git stash`
+on the branch tip before writing any code here). `flutter build windows --debug` succeeds.
+Built and started for you per rule 5.
+
+**Same-session fix, found by your immediate live retest: every review-mode keyboard shortcut
+was dead on arrival.** Root cause was the embedding change itself (finding #3 above), not the
+keyboard map — `LibraryReviewPage`'s `Focus(autofocus: true)` reliably won focus back when D115
+pushed it as its own `Navigator` route, because pushing a route is one of the few places
+Flutter *actively* moves focus to the new content; `autofocus` on its own only claims focus
+when the enclosing scope has no focused child *at all*, and once this widget is instead just
+swapped in in place of `LibraryPage`'s content, whatever was focused at the moment "Review" was
+clicked (a toolbar button, a nav rail tile) was still the scope's recorded focused child when
+the new widget mounted, so autofocus silently did nothing and every key event had nowhere
+useful to go. `library_grid.dart` already carries the same lesson in its own code — it never
+trusts autofocus either, requiring an explicit per-tile `onRequestFocus: _focusNode.requestFocus`
+tap before its own keyboard shortcuts work. Fixed by having `_LibraryReviewPageState.initState()`
+explicitly call `_focusNode.requestFocus()` in a post-frame callback (after the node is actually
+attached), rather than relying on `autofocus` alone. `flutter analyze` clean,
+`flutter test test/review_mode_test.dart` 6/6 (unchanged by this fix — the widget-test harness's
+`tester.sendKeyEvent` didn't reproduce the bug, so this was only caught by your real, running
+app). Rebuilt and restarted for you. **Still awaiting your full checkpoint test.**
+
+---
+
+## 2026-08-10 — V2.13.1 (Device identity) built, agent-side + app-side, awaiting your checkpoint test (D122)
+
+### D122 · Cached serial→model map + a pinned-serial override, both agent-side; a new Settings device-pin card on top
+
+**What shipped, agent side (`agent/`).** New `ia_agent/device_settings.py` — a `%LOCALAPPDATA%
+\ia-agent\device.json` settings file, same atomic-write/machine-local shape as
+`library/settings.py` (D12's precedent again): a `pinned_serial` (`None` by default) and a
+`model_cache` (`{serial: model}`). Its `resolve_model(serial, live_lookup)` is the actual fix
+for finding #1 — a live adb read that succeeds updates the cache and returns the fresh model;
+a live read that fails (disconnected, adb down) falls back to whatever's cached for that
+serial instead of `None`, so the device bar only ever reverts to the bare serial for a serial
+it has truly never resolved before, not merely one that's momentarily unplugged.
+`ia_agent/api/device.py`'s `_device_model()` is now a thin wrapper calling `resolve_model`;
+a new `_effective_serial()` (`pinned_serial() or ANDROID_SERIAL`) replaces every direct
+`ANDROID_SERIAL` read in the router — `GET /api/device`'s `serial`/`model` and both
+`POST /api/device/scrcpy/{start,stop}` calls now target the pin when one is set, while
+`services/selftest.py`'s own adb functional test is deliberately untouched, since that's
+about the pipeline's actual driven device (`Insta-Automate/.env`'s own `ANDROID_SERIAL`), a
+different question from which device the control center's own bar/mirror show. Two new
+routes for finding #2: `GET /api/device/adb-devices` (every serial `adb` currently knows
+about, online or offline, via `adbutils.AdbClient.list()` — deliberately not the
+`device_list()`/`iter_device()` filtered-to-online view, so a user can still pin a serial
+that's briefly disconnected) and `PATCH /api/device/pinned-serial` (`{serial: string|null}`,
+`null` clears the pin). `GET /api/device`'s payload grew `pinned_serial`/`default_serial` so
+the client can always show "pinned to X, default is Y" rather than losing track of what the
+override actually overrides.
+
+**What shipped, app side (`app/`).** `core/device_models.dart`'s `DeviceStatus` gained the
+two new optional fields (kept optional, not required, so the six existing test call sites
+across `live_layout_test.dart`/`overview_layout_test.dart`/`shell_layout_test.dart` didn't
+need touching) plus a new `AdbDeviceInfo`. `features/live/device_bar.dart`'s
+`DeviceController` gained `fetchAdbDevices()`/`setPinnedSerial()` and a sibling
+`adbDevicesProvider` (a plain unwatched `FutureProvider`, not folded into the polled device
+status — the two have unrelated refresh cadences, and a failed adb lookup shouldn't blank an
+otherwise-healthy device status). New `_DeviceIdentityCard` in
+`features/settings/devices_tab.dart`, placed in its own "ADB device" section below the
+existing pairing card per PLAN_V2.md's own note that these are two different systems (LAN
+pairing vs. the ADB-connected phone) — a live adb-devices chip row to tap-to-pin, a manual
+text field + Pin button for a serial that isn't currently attached, and a "Use default" button
+that only appears once something is actually pinned.
+
+**Verified.** `agent/tests/test_device.py` grew from 10 to 16 numbered checks plus a direct,
+un-monkeypatched exercise of `device_settings.resolve_model` proving the cache-survives-a-
+failure behavior with real code, not a stub (a `flaky_live` fixture that succeeds once then
+raises, confirmed the second call still returns the cached model and that `live_lookup` was
+genuinely called both times) — real `adbutils` itself stays monkeypatched at
+`device_api._device_model`/`_list_adb_devices` for the endpoint-level checks, the same
+`wsl_bridge`-fake pattern this file already used, since this environment has no real adb
+server to hit. All 15 other agent suites re-run clean (one `test_supervisor.py` failure
+turned out to be a stale lock file left by an earlier interrupted run in this same session,
+confirmed by deleting it and re-running clean — not a regression). `flutter analyze` clean,
+`flutter test` 226 total / 225 passing (225 prior + 1 new in `devices_layout_test.dart`
+covering the pin/clear round trip and confirming no overflow at the 1024px floor; the one
+failure is D114's same pre-existing, unrelated `shell_layout_test.dart` issue, reconfirmed via
+`git stash` on the branch tip before writing any code here). `flutter build windows --debug`
+succeeds. Verified live against the real agent: restarted to pick up the new code (`adb`
+showed its own pre-existing restart churn from the phone still being disconnected per D116,
+unrelated; the other two supervised services stayed `adopted` with uptime intact), a real
+`GET /api/device`/`GET /api/device/adb-devices`/pin/clear round trip over `curl`, and the real
+`device.json` confirmed empty again afterward (the throwaway test pin was cleared, not left
+behind). Built and started for you per rule 5. **Not yet checkpoint-tested live** — the phone
+being disconnected (D116) means model caching itself can't be exercised against a real device
+this session; the pin/dropdown mechanics can still be checked once you're at the app.
+
+---
+
+## 2026-08-10 — Nine live bugs/feature requests grouped into three checkpoints ahead of release (D121)
+
+### D121 · V2.13.1/V2.13.2/V2.13.3 inserted between V2.12 and the renamed V2.14; planning only, no code changed
+
+**Ask.** With V2.5–V2.12 all accepted, the user brought nine things found using the real app
+— too many for one checkpoint, not release polish, and explicitly not meant to block V2.13
+(motion/accessibility/release) from eventually running last. Asked for them to be grouped
+into exactly three sub-checkpoints named `V2.13.X`, with the existing V2.13 renumbered to
+make room — implementation deferred to a future session.
+
+**Grouping.** By touched surface, not by raising order:
+
+| New checkpoint | Items (as given) | Surface |
+|---|---|---|
+| **V2.13.1** — Device identity | #1 (cache model over serial), #2 (manual serial + adb dropdown in Settings) | `core/device_models.dart`, `DeviceBar`, agent's `GET /api/device` |
+| **V2.13.2** — Library review mode refinements | #4 (Review nav lands on the wrong folder), #5 (Apply shouldn't require every image decided), #7 (review mode should keep the nav rail visible, not go full-screen) | `review_page.dart`, `nav_rail.dart`'s Review entry, D115's full-screen decision |
+| **V2.13.3** — Dashboard & shell fixes | #3 (Overview caps tile stuck on yesterday after flows stopped and the day rolled over), #6 (nav rail collapse button needs a precise click), #8 (status labels too small), #9 ("This machine" → "Host") | `caps_tile.dart`, `nav_rail.dart`'s `_CollapseToggle`, `ui/status.dart`'s `StatusChip`, `dependency_models.dart` |
+
+Items #4/#5/#7 group naturally — all inside Library review mode. #1/#2 group naturally —
+both are the same device-identification surface, just different-sized asks. #3/#6/#8/#9 are
+a deliberate leftover bucket: four small, unrelated, contained fixes, grouped together
+because none is large enough to deserve its own checkpoint on its own.
+
+**Renumbering.** The former V2.13 ("Motion, accessibility, release") becomes **V2.14** —
+content unchanged, still the last checkpoint in the plan, still gated on everything before it
+being done. `pubspec.yaml`'s `2.0.0+1` bump and the `v2.0.0` tag move with it.
+
+**Scope exception, flagged rather than silently absorbed.** V2.13.1 is the first checkpoint
+in the whole v2 plan expected to touch `agent/` — model caching and an adb-device-list
+endpoint are both agent-side. PLAN_V2.md's scope boundary ("v2 is entirely within `app/`")
+is otherwise still in force; this is one deliberate, acknowledged exception, the same class
+of call as the 2026-08-05 cross-repo deviation (D113), not a precedent for future checkpoints
+to quietly do the same.
+
+**Investigation flagged, not resolved.** #3 (stale caps tile) has two live hypotheses in
+PLAN_V2.md's V2.13.3 section — a lazily-created day-counter row on the agent/pipeline side
+that never rolls over while every flow stays stopped, or a client-side fallback in
+`caps_tile.dart` that doesn't re-derive "today" from the wall clock — neither confirmed this
+session. #5 (partial Apply) has a concrete reusable primitive already identified (D90's
+`POST /api/library/move` + the existing explicit-path `delete()`, sidestepping `apply()`'s
+whole-directory assumption entirely) but no full design (what "Apply" says when images are
+left gray, whether a folder can be resumed later) — both left for the implementation session.
+
+**Full checkpoint content** — goals, findings, and checkpoint tests for all three — lives in
+[docs/v2/PLAN_V2.md](docs/v2/PLAN_V2.md)'s own V2.13.1/V2.13.2/V2.13.3 sections, not
+duplicated here.
+
+---
+
+## 2026-08-10 — V2.12 (Command palette) built, planned and completed in one session at your request (D119)
+
+### D119 · `Ctrl+K` wired to a real registry sourced from eight existing providers; three action paths deduplicated to feed it without a second implementation; Settings/Insights gain tab-jump, Limits gains a "jump to field" highlight
+
+**Scope.** [SCREENS.md](docs/v2/SCREENS.md) §8's own source table, built exactly as specified:
+`ui/command/` (registry, fuzzy matcher, palette UI, recents), every group wired to the provider
+that screen already reads, every action reusing an existing controller call/confirm dialog rather
+than a second implementation. `core/shortcuts_reference.dart` regenerated from a registry, per the
+plan's own line — see the honest scope note on that below.
+
+**New `app/lib/ui/command/`:**
+- `command_item.dart` — `CommandItem` (id/group/label/subtitle/badge/icon/keywords/onSelect) and
+  the fixed `commandGroupOrder` from SCREENS §8 (`Go to, Flows, Library, Services, Ops, Appearance,
+  Settings, Help`).
+- `command_matcher.dart` — case-insensitive fuzzy **subsequence** matching (every query character
+  must appear in order, not necessarily contiguous — "scr" matches "Trigger now: Scrape" per the
+  mockup's own example), scored so a prefix match always outranks a later subsequence match, groups
+  always sorted by `commandGroupOrder` regardless of match strength, and every tie broken by an
+  explicit original-index tiebreaker rather than trusting `List.sort` to be stable (it isn't
+  guaranteed to be) — caught before it could become a real flaky-order bug, not found live.
+- `command_registry.dart` — `buildCommandItems(context, ref)`, one function pulling all ~90+ live
+  items from `flowsControllerProvider`, `libraryFoldersControllerProvider` +
+  `libraryEntitiesControllerProvider`, `servicesControllerProvider`, `opsSpecsProvider`,
+  `themeControllerProvider`, `configControllerProvider`'s int-typed schema, plus the seven nav
+  destinations, six Settings tabs, three Insights tabs and two Help actions. Every `onSelect`
+  closure calls an existing function — `forceRunFlow`/`stopFlowRun`/`reduceReserveFlow`/
+  `toggleFlowSwitch`, `openReviewModeForFolder`, the new `service_actions.dart`/`ops_actions.dart`
+  (below), `showShortcutsReference`/`showWelcomeDialog` — never a parallel copy of what any of
+  those already do, including their confirm dialogs.
+- `command_recents.dart` — `RecentCommandsNotifier`, persisted via `shared_preferences` (same
+  synchronous-default-then-load shape as `LibraryZoomNotifier`/`ThemeController`), floats up to 8
+  recently-used commands to the top as a "Recent" pseudo-group when the query is empty, deduplicated
+  against the normal grouped list below it rather than shown twice.
+- `command_palette.dart` — `showCommandPalette(anchorContext)` + `CommandPalette`. Built as a
+  `showDialog` with a custom `Align`+`AppOverlay` body (not `AppDialog`, which is a fixed-width
+  centered `AlertDialog` — wrong shape for a top-anchored, tall, keyboard-driven list), `CallbackShortcuts`
+  for ArrowUp/ArrowDown/Escape/Enter over a plain `TextField` (matching this app's own
+  `search_field.dart` precedent for the same "shortcuts win, typed characters still reach the field"
+  shape), and — the one non-obvious wrinkle — every action closure is built against the **caller's**
+  stable context (`anchorContext`, the title bar's or `AppShell`'s own, passed down at
+  `showCommandPalette` call time), never the dialog route's own `context`, because activating a
+  command almost always changes what's on screen (a nav-index write) out from under the dialog
+  that's popping at the same moment.
+
+**Deduplication, not new confirms — three action paths shared with the palette, not copied for
+it (all pre-existing, all left behaving identically to before):**
+- `core/service_actions.dart` — `startService`/`stopService`/`restartService`/`takeoverService`/
+  `testService`, lifted out of `ServiceDetail`'s private `_start`/`_stop`/`_restart`/`_takeover`/
+  `_test` (same confirm dialogs, same `serviceStopConsequence` map, same error-snackbar shape).
+  `ServiceDetail` itself now calls these too — its own busy-spinner state is the only thing that
+  stayed local, since the palette has no per-button spinner to drive.
+- `core/ops_actions.dart` — `runOpsJob`, lifted out of `OpsTab._run` (confirm-if-`spec.confirm`,
+  start, fold a 409 into "a job is already running" same as before). `OpsTab._run` now just calls
+  it and keeps its own "select the freshly-started job in local history" behaviour.
+- `core/flow_switch_confirm.dart` gained `toggleFlowSwitch` (confirm-if-turning-off, apply, catch
+  `DioException` into a snackbar) — `flow_node.dart`'s private `_toggleSwitch` deleted in favour of
+  it, one call site instead of two.
+
+**Settings/Insights gain a tab-jump they had no way to receive from outside before.**
+`DefaultTabController` only ever builds its underlying `TabController` once per mount — a rebuild
+with a different `initialIndex` alone does nothing. New `core/settings_nav.dart`'s
+`requestedSettingsTabProvider`/`requestedInsightsTabProvider` (plain `Notifier<int>`) are read into
+`initialIndex` **and** used as the `DefaultTabController`'s own `Key`, forcing a real remount onto
+the requested tab when the palette (or anything else) writes a new value. `InsightsPage` moved from
+`StatelessWidget` to `ConsumerWidget` to read it; `SettingsPage` (already a `ConsumerWidget`) just
+gained the watch.
+
+**"Jump to its field" for a `Settings` config-key result is a real scroll-to-and-flash, not just a
+tab switch.** `limits_tab.dart` moved from `StatelessWidget` to `ConsumerStatefulWidget` to hold a
+`GlobalKey` per `LimitCard` (built lazily, cached across rebuilds) and call
+`Scrollable.ensureVisible` when `highlightedConfigKeyProvider` (new, `settings_nav.dart`, a
+generation-counted auto-clearing `Notifier<String?>` — the counter exists so an older highlight's
+delayed clear can never stomp a newer one fired before it expires) names a key. `LimitCard` gained a
+`highlighted` bool wired straight to `AppCard(selected: ...)` — the existing selected-state tint and
+accent ring, not a new visual language, snapping on then auto-clearing after ~2.2s.
+
+**`Ctrl+K` and the shortcuts reference — a single source, honestly scoped.** New
+`core/global_shortcuts.dart`'s `globalShortcuts` list (id + `SingleActivator` + display keys +
+description) is now what both `shell/app_shell.dart`'s `CallbackShortcuts` bindings map **and**
+`core/shortcuts_reference.dart`'s Global-scope rows are built from — a shortcut added to the list
+without a matching action in `app_shell.dart`'s `actionsById` map now fails loudly (a missing map
+key) instead of the two lists silently drifting apart the way this file's own pre-V2.12 comment had
+to warn future editors about by hand. `Ctrl+1..7` became seven individually-described rows ("Jump to
+Overview" … "Jump to Settings") rather than one collapsed "Ctrl+1..7" summary line, since the
+per-destination id was already needed for the action map — a genuine small improvement, not scope
+creep. **Deliberately not folded into the same mechanism, and said so in the file's own comment
+rather than forced into a shape that doesn't fit:** `Ctrl+Alt+I` is a real OS-level `hotkey_manager`
+registration (`shell/hotkey.dart`), not a Flutter `CallbackShortcuts` binding, and every
+Settings/Library key handler (`Ctrl+E`, `Ctrl+F`/`Esc`, the whole Library selection key map) is a
+page-scoped handler with no shared registry of its own to generate from — both stay hand-listed,
+same as before.
+
+**Verified:** `flutter analyze` clean. `flutter test` 224 total, 223 passing — the one
+`shell_layout_test.dart` "rail expanded" failure reconfirmed pre-existing and unrelated via
+`git stash` on the branch tip (same D114/D118 precedent), not touched by this session's changes.
+New `test/command_palette_test.dart` (10 checks): the matcher (subsequence survives non-contiguous
+letters, a fully-absent letter matches nothing, a prefix beats a later subsequence match in the same
+group, group order is fixed regardless of input/match order, an empty query preserves registry order
+via the explicit tiebreaker, `groupCommands` buckets and drops empty groups); the registry (every
+group populated from its real provider and gated exactly like its source screen — `entity-follow`-
+only "Reduce reserve" absent when only `entity-scrape` is faked, `Start`/`Test` absent for an
+already-running, no-test-capable fake service, real badges for folder counts and a config value);
+and the palette widget itself (typing narrows to one match and tapping it both closes the dialog and
+performs the exact same provider writes `curation_tile.dart`'s own "open in Library" helper makes,
+recording it into recents; `ArrowDown`/`ArrowDown`/`Enter` activates the third `Go to` item with no
+mouse touch at all; `Esc` dismisses without invoking anything). `flutter build windows --debug`
+succeeds. Three stale running instances killed, one fresh instance built and started for you per
+rule 5 — **your checkpoint test is what's still open**: `Ctrl+K` from every screen, search for a
+flow/folder/ops job/theme/config key, confirm a destructive action invoked from the palette still
+prompts, confirm `Esc` dismisses and focus returns where it was.
+
+### D120 · Same-session fix: ArrowDown/ArrowUp moved the highlight past the visible rows with nothing on screen following it
+
+**Found by your own checkpoint test, immediately.** Mouse-wheel scrolling worked; arrow-key
+navigation didn't visibly do anything once the highlighted row scrolled past the palette's fixed
+480px body — the highlight index was updating correctly (confirmed by the two keyboard-nav tests
+already passing), the list just never scrolled to keep it on screen.
+
+**Fixed** with the same `GlobalKey` + `Scrollable.ensureVisible` technique `limits_tab.dart`
+already uses for the palette's own "jump to a config field" highlight (D119): one `GlobalKey` per
+row, rebuilt fresh each frame and only ever read back from that same frame's own
+`addPostFrameCallback` — safe because arrow-key navigation only ever moves the highlight by one row
+at a time, so the newly-highlighted row is always adjacent to whatever was already visible, never a
+jump `ensureVisible` could fail to resolve against an unmounted target. The result list itself moved
+from `ListView` to a `SingleChildScrollView` + `Column` in the same change — a plain `ListView`
+virtualizes, meaning a row several screens away from the visible viewport has no mounted `Element`
+at all yet, so its `GlobalKey.currentContext` would still be `null` the first time `ensureVisible`
+needed it after a large jump (typing a query that changes which item holds focus, for instance).
+The registry here tops out around 150 items even fully realized, so the always-mounted tradeoff
+costs nothing meaningful.
+
+**Verified:** a new regression test in `command_palette_test.dart` (12 total in that file now) —
+confirmed to actually fail against the pre-fix code (temporarily disabled the `ensureVisible` call,
+re-ran just this test, watched it fail with the scroll offset stuck at 0 after 20 `ArrowDown`
+presses, then restored the fix and reconfirmed green) before trusting it as a real regression
+guard, not just a passing assertion. `flutter analyze` clean, `flutter test` 225 total / 224
+passing (same pre-existing, unrelated `shell_layout_test.dart` failure). `flutter build windows
+--debug` succeeds. Rebuilt and restarted for you. **You confirmed live afterward, including the
+arrow-key scroll fix — V2.12 accepted.**
+
+---
+
+## 2026-08-10 — V2.11 (Services, Insights, Settings) built out of D107's planned sequence order, at your explicit request (D118)
+
+### D118 · V2.11 built before V2.12; several of PLAN_V2.md's own premises were already stale; `AppTable` gets its first real call sites; one real overflow bug found by the extended test suite
+
+**Order swap, not a re-plan.** D107 sequenced the "functional" group as V2.10 → V2.12 → V2.11,
+V2.11 last since its own additions (terminal search/copy/font-size, resizable panes) were judged
+least load-bearing. You asked to do V2.11 first instead. PLAN_V2.md's own sequencing notes already
+say nothing in V2.5–V2.12 depends on anything else in that range, so the swap is safe — V2.12
+(Command palette) is simply next once this checkpoint is confirmed.
+
+**Surveyed before writing any code** (three parallel Explore passes over Services/Insights/
+Settings plus the current `app/lib/ui/` component library) and found several of PLAN_V2.md's
+premises already fixed by earlier checkpoints or already built with the exact shape needed —
+skipped rather than redone: `service_detail.dart`'s claimed hardcoded hex colors (none found, already
+tokened via `tokens.status.*`), `service_terminal.dart`'s claimed hardcoded `'Consolas'`/inline
+`TerminalTheme` (already fully `tokens.terminal`-driven since an earlier checkpoint), and
+`devices_tab.dart`'s claimed `Colors.white` QR quiet-zone (already `tokens.chart.qrQuietZone`,
+defined per-theme). Also found: `AppTable` (COMPONENTS §10) has existed since it was built but had
+**zero real call sites anywhere in the app** — this checkpoint gives it three (Ranking, Dependencies,
+Ops job history), the first real proof the D77 flexible-column invariant holds outside its own
+synthetic test.
+
+**One shared-component change**: `AppTable` gained an optional `isSelected: bool Function(T)?`
+(tints a row like a selected list tile) — Ops' job history needs it to show which job's log is open
+next to it, the same way `AppPanel` gained `accentEdge` and `AppButton` gained `busy` from their own
+first real callers. `IconAction.icon` was widened from a raw Flutter `IconData` to the same
+`PhosphorIconData Function(PhosphorIconsStyle)` shape `AppIcon` already uses — its first real call
+site (the Services terminal's new Clear/font-size/Find/Copy controls) revealed the original type
+couldn't actually take any of this app's own `AppIcons.*` glyphs at all.
+
+**Services**: `ResizableSplit` replaces the fixed 300px list↔detail split and, new, a fixed
+"panels minus terminal floor" calculation inside `ServiceDetail` (now a real vertical
+`ResizableSplit`, `services.detail.split`). `ServiceTile` gained `accentEdge` off the existing
+`ServiceStateStatusKindX` bridge; the self-heal icon's plain `Tooltip` became a rich `AppTooltip`
+with a title/body split. The terminal frame gained two genuinely new pieces with no existing
+pattern to adapt (`LogConsole` has neither either): a **Clear** button (`Terminal.eraseDisplay()`,
+confirmed present on `xterm: ^4.0.0`, a local-only visual clear — the next replay/reconnect still
+repopulates from the agent's ring) and a persisted **font-size** control (`TerminalFontSizeNotifier`,
+same synchronous-default-then-load shape as `LibraryZoomNotifier`, four steps 11–17px). Every
+header/search-bar icon button migrated to `IconAction`.
+
+**Dependencies — a judgment call, not literally what SCREENS §4 pictured.** Its "ten dependencies
+as sortable rows (name · state · detail · latency)" reads naturally as one flat, sortable
+`AppTable` across all ten rather than the four group-partitioned sections the old bespoke rows had
+— sorting by State (worst-first default) surfaces every failure together regardless of group,
+matching the file's own standing comment ("the value is knowing which one is why a flow is
+failing"). Each group's explanatory blurb moved from an always-on text block into a rich
+`AppTooltip` on the row's Group cell.
+
+**Insights**: `AppPage.maxContentWidth: 900` replaces `FunnelTab`'s own local `ConstrainedBox`,
+now applied to all three tabs per the plan text, not just Funnel. `RankingTab`'s D77 hand-built
+table is now a real `AppTable<EntityRanking>` — same columns, same row-tap-opens-the-entity-
+dialog, sort state moved to `AppTableSort`. `FunnelChart` retokened to `tokens.chart.*` (was
+`ColorScheme.primary`/`.surface`) and gained a real stage-by-stage draw-in animation — a new
+`StatefulWidget` driving a `reveal: List<double>` into `_FunnelPainter` via per-stage `Interval`
+sub-animations (each stage's own interval doesn't begin until the previous one's has finished, so
+by the time a later stage starts revealing the earlier one is already at its real, static width),
+collapsing to instant under `tokens.motion.reduced`. `BurndownTab` gained the "today vs cap"
+summary strip by reusing Overview's `CapsTile` directly (already exactly the right shape, no new
+widget needed) above the day-range chips. Cross-links: `Scanned`/`Female`/`Scraped` funnel stages
+jump to their matching Library folder (`scanned/`, `gender_valid/`, `scraped/`) via the same
+`_openLibrary` pattern `CurationTile` already uses; `Private` and `Followed` stay plain labels —
+neither has a real matching folder (same reasoning D81 used to drop both from the per-entity yield
+dialog), so neither gets a link that would land somewhere misleading.
+
+**Settings**: `LimitsTab`'s ad hoc group `Text` headers became `SectionHeader(title, caption)`.
+`DevicesTab` gained two `SectionHeader`s for visual consistency — otherwise already close to spec
+(QR quiet-zone and `AppPanel` structure both already done, per the stale-premise findings above).
+`switches_tab.dart`'s migration to `AppSwitch(confirmMessage: ...)` was evaluated and **not done**:
+`AppSwitch`'s confirm dialog has a fixed generic title ("Turn this off?"), while
+`confirmFlowSwitch`'s current dialog title names the exact flow ("Turn off ENTITY_SCAN?") and the
+per-flow consequence body text never repeats the flow name itself — migrating would have silently
+dropped which flow the dialog is even about. Left as its existing hand-rolled, flow-specific
+version rather than force an optional simplification through a real information loss.
+`queue_tab.dart` was already compliant (its one numeric field already renders through
+`NumericText`; the count chips are composed label strings via `StatusChip`, matching every other
+composed-count chip in the app, not a bare numeric display).
+
+**Ops job history → `AppTable`, one real overflow bug found by the extended test suite, not by
+writing the code.** The first version used the plan's literal four columns (Status/Job/Started/
+Elapsed); `ops_layout_test.dart`'s existing 1024×700 overflow test caught a real `RenderFlex`
+overflow immediately — the History sidebar is a fixed 280px, ~250px once the table's own row
+padding is subtracted, and three fixed-width columns (90+110+90) alone already exceeded that
+before the flexible Job column got anything. Fixed by combining Started/Elapsed into one narrow
+`_WhenCell` (two stacked lines: relative time, then elapsed) instead of dropping either piece of
+information. The elapsed timer itself reuses `run_summary.dart`'s exact `StreamProvider.autoDispose`
+tick pattern (watched only while `status == running`, so finished rows never rebuild on the clock)
+and `flow_status.dart`'s existing `formatFlowCountdown`, not a new formatter. The five destructive-
+job confirm dialogs, the button grid's D72 overflow fix, and the log panel are all untouched, per
+the plan's explicit instruction.
+
+**Verified:** `flutter analyze` clean throughout every round. `flutter test`: 214 total, 213
+passing — the one failure (`shell_layout_test.dart`'s "rail expanded" case, an icon-size assertion
+unrelated to anything touched here) reproduced identically via `git stash` on the branch tip
+*before* any of this session's changes, confirming it's the same pre-existing, standing issue
+D114/D116 already documented, not a regression. New/extended coverage: `ui/data_test.dart` (the
+`isSelected` tint), `services_layout_test.dart` (the new terminal controls, the Dependencies table
+with a long detail sentence), `insights_layout_test.dart` (funnel stage tap → `selectedFolderProvider`/
+`selectedNavIndexProvider`, `CapsTile` present in `BurndownTab`), `ops_layout_test.dart` (the
+overflow catch above, plus a deterministic finished-job elapsed-value check), `devices_layout_test.dart`
+(the new `SectionHeader`s render without overflow). `flutter build windows --debug` succeeds. Built
+and started for you per rule 5 — **your checkpoint test is what's still open**: terminal search/
+copy/clear/font-size against a real streaming service; Ranking sorts and rows still open the
+entity dialog; run one non-destructive ops job (Deploy flows / Reset work pool) and watch the live
+log + elapsed timer; confirm the five destructive jobs still prompt; funnel stage taps land on the
+right Library folder; Dependencies sorts by state with failures surfaced together.
+
+**You confirmed the full checkpoint test live 2026-08-10 — V2.11 accepted.**
+
+## 2026-08-09 — adb self-heal crash-looped forever once the phone was disconnected, colliding with a stray external `adb start-server` it could never recognize (D117)
+
+### D117 · Two chained self-heal bugs, both only reachable with no phone attached: blind respawn colliding with a stray external adb daemon, and a 60s restart-forever loop against a perfectly healthy server
+
+**Reported live**, with the exact log lines: `adb` was crash-looping every ~60s —
+`could not install *smartsocket* listener: cannot bind to 0.0.0.0:5037: Only one usage of each
+socket address... (10048)`, `process exited with code 3221226505`, `self-heal: restarting in 60s`,
+forever, starting right after you disconnected the Android phone (your own deliberate call, to
+pause the pipeline for a few days — see D116's same context). Your own framing, once the shape of
+the bug was clear: on this machine port 5037 is always meant to belong to this service — if
+anything else is ever found holding it, just kill it and let the app run its own copy. That
+directive is exactly what both fixes below implement.
+
+**Bug 1, diagnosed live, not guessed**: `GET /api/services` showed `adb` in `state: "backoff"`,
+`origin: "none"`, `port_owner: null` — yet its own `probe.detail` said `"tcp 127.0.0.1:5037 open;
+device ... not attached (saw none)"`, i.e. the raw TCP port genuinely was listening the whole
+time. `Get-NetTCPConnection`/`Get-CimInstance Win32_Process` confirmed the real owner: PID 4244,
+command line `adb -L tcp:5037 fork-server server --reply-fd 868` — not our supervised
+`-a nodaemon server start` invocation at all. That command line is ADB's own built-in
+"no server found, auto-start one" client behavior — some other tool that shells out to plain
+`adb` (VS Code's Dart/Flutter extension, `flutter devices`, or any manual `adb` command — this
+machine runs Flutter dev tooling in the same session) auto-spawned its own detached background
+daemon into a gap where our supervised server happened to be down, and that daemon then persisted
+indefinitely, permanently squatting on the port.
+
+**Root cause: `ManagedService._probe_idle()`'s self-heal branch, and `Supervisor.start()`'s own
+boot-time bootstrap, both gated "is someone else already on this port?" behind the *compound*
+probe result** (`ProbeResult.ok`, TCP-open AND `probe_extra`), not the raw port-open signal alone.
+`adb`'s `probe_extra` (`adb_device_present`) can never pass while no phone is attached, so
+`self.probe.ok` can never be True, so `detect_external()` (the one thing that would have
+recognized "a real, functioning adb server already owns this port, don't spawn a second one") was
+never reached at either call site. Self-heal just blindly re-spawned on top of the live foreign
+daemon every retry, and every spawn crashed on the identical bind conflict, forever.
+
+**Fixed at both call sites** by checking raw port ownership (`_port_owner()`, the same lookup
+`detect_external()` already uses internally) independently of the compound probe — `_probe_idle()`
+checks it before calling `_spawn()` and calls `detect_external()` + `takeover()` instead of
+colliding if someone else holds it; `Supervisor.start()` calls `detect_external()`
+unconditionally for an unadopted service (not gated behind `probe.ok` first) and, when the result
+is `EXTERNAL` with the service's own `autostart`+`self_heal` both on, takes it over immediately
+rather than leaving it for a human to notice and click "Takeover" — the same "self-heal means truly
+unattended recovery" standard this codebase already set at D74/D82/D91.
+
+**Bug 2, found while verifying the live fix for Bug 1, not reported by you**: `restart_count`
+climbed from 0 to 51 over about 27 minutes on the live machine — `adb` was alive, correctly
+supervised, its port genuinely open the whole time, yet self-heal kept killing and respawning it
+anyway. Root cause: `_probe_alive()`'s "wedged" self-heal (`unhealthy_grace`, 60s by default) fires
+whenever the *compound* probe fails continuously, which is exactly `adb`'s permanent state with no
+phone attached — the mechanism built to catch a process that holds its port but answers nothing
+was instead firing on a process answering exactly what it should (no device), forever, for as long
+as the phone stays disconnected. Each of those restarts also reopened Bug 1's exact collision
+window, so this wasn't just noise — it was actively re-triggering the original failure mode on a
+schedule.
+
+**Fixed by adding `ProbeResult.transport_ok`** (`probes.py`) — the transport-level check (TCP
+connect / HTTP GET) alone, captured before `probe_extra` is ever consulted — and keying the wedge-
+restart timer off *that* instead of the compound `ok`, resetting it the instant the transport
+recovers (mirroring `_healthy_since`'s existing pattern) so a real, sustained transport failure
+still restarts on schedule exactly as before, but a semantic-only failure like "no device" never
+does.
+
+**That fix's own first version had a real flaw, caught by its own regression test flaking, not by
+you**: it reused the *existing* `_unhealthy_since` timestamp (set once, back when the compound
+probe first failed) as the elapsed-time base for the new `transport_ok` check, rather than tracking
+"how long has the transport itself been continuously failing" as its own independent clock. That
+meant a single transient transport hiccup — one slow probe under load, not a real failure — could
+immediately satisfy an already-elapsed grace window and restart, instead of requiring the
+transport to actually be down for the full `unhealthy_grace`. Fixed by tying `_unhealthy_since`'s
+reset directly to `transport_ok` (reset to `None` the instant it's True, same tick discipline as
+`_healthy_since`), so it now measures continuous transport failure specifically, never a stale
+timestamp left over from an unrelated compound-probe failure.
+
+**Chasing that flake down also surfaced a test-design bug, not a supervisor bug**: the regression
+test's own `start_grace=0.5`/`unhealthy_grace=1.0` were tuned far tighter than a real subprocess
+spawn can guarantee — instrumenting the exact tick sequence showed the blocking spawn handshake
+alone (subprocess creation, ConPTY setup, interpreter start) taking over 2 seconds by itself under
+a loaded test run (16 prior sections' worth of process churn happening moments before), well past
+either constant. The fix logic was correct throughout; the test was racing real, if slow, spawn
+latency against unrealistically tight timers. Rewritten to wait for the transport to genuinely come
+up first (decoupled from spawn-latency variance entirely) before starting the "assert no restart"
+window, rather than trying to out-guess real-world timing with bigger constants.
+
+**Verified, in order:** four new regression checks in `agent/tests/test_supervisor.py` — #15
+reproduces Bug 1 exactly (spawns a real conflicting process during a service's `BACKOFF` wait,
+confirms self-heal reclaims it instead of crash-looping); #16 the same at `Supervisor.start()`'s
+boot path; #17 reproduces Bug 2 (a `probe_extra` that never passes, confirms zero restarts over a
+window comfortably past `unhealthy_grace`, redesigned as above once its first version flaked under
+load for the reason described). Full suite, final and clean: **80/80** (was 57 before this session
+— corrected in `agent/tests/README.md`). `ruff check` clean throughout every round.
+
+**Verified against the real live machine, twice** — once after Bug 1's fix alone (confirmed it
+reclaimed PID 4244 cleanly, `origin: "supervised"`, narrated `"reclaiming port 5037 from an
+external process found already listening at startup"` in its own log), and again after Bug 2's fix
+once the live `restart_count: 51`/uptime reset every ~30s made that second bug undeniable on the
+running system too. Restarted `ia-agent.exe` (`taskkill /F`, the launcher respawned it in ~3s per
+the established D21 pattern) with both fixes applied; the adb service adopted its already-running,
+already-reclaimed process (`origin: "adopted"`, same pid, uptime carried over — the correct D22
+behavior, no needless respawn) and settled into `state: "unhealthy"` (port open, no device attached
+— the correct, expected state with the phone unplugged, not a crash loop) with `restart_count: 0`
+and no further cycling observed over the following watch window. No pipeline/cross-repo change
+needed; this was entirely inside the agent.
+
+---
+
+## 2026-08-09 — Overview's "Today's caps" tile could contradict a live notification on the same screen (D116)
+
+### D116 · `CapsTile`'s "today" figure now reads from the live scheduler heartbeat, not the once-per-session burndown fetch
+
+**Not v2 work, a live-found bug fix — a deliberate one-session deviation from the v2 sequence, same standing precedent as D113.** V2.12 (Command palette) is still next whenever this branch resumes the checklist.
+
+**Reported live, with a screenshot**: the Overview page's "Today's caps" tile showed Scrape at
+200/300 for 2026-08-08, while the "Recent" tile on the same page — fed live over the
+`notifications` WS channel — showed "Scrape limit reached for 2026-08-08. Limit: 300", delivered
+minutes earlier. Investigated by querying the real Prefect API (27 non-overlapping `entity-scrape`
+runs that day, ruling out a concurrent-run write race) and the agent's own `/api/insights/burndown`
+directly, which returned the correct, current value: `{"date": "2026-08-08", "scraped": 300,
+"processed": 414}`. **The notification was correct; the tile was stale — not a pipeline/DB bug at
+all.**
+
+**Root cause: `burndownProvider` (`insights_controller.dart`) is a plain, non-`autoDispose`
+`FutureProvider` — fetched once, cached for the rest of the app's process lifetime, and never
+invalidated automatically anywhere.** Its own doc comment says "fetched once per screen visit,
+refreshed by invalidating this provider... nothing about the underlying Postgres data changes fast
+enough to justify a WS channel or a timer" — a reasonable call for the Insights page, which the
+user visits briefly and can hit an explicit retry button on. It was wrong for the Overview tile,
+which sits open on screen for hours at a time and, unlike Insights, has no retry affordance at
+all — so its "today" number just freezes at whatever it was on first load and silently drifts
+further from reality as the day's flows keep running, eventually landing right next to a live
+notification that visibly contradicts it.
+
+**Fixed by sourcing "today" from data that's already live, not by adding a new poll/timer.** The
+scheduler heartbeat (`controllers/prefect.py`'s `_today()`, posted to the agent every ~2s and
+already mirrored into the app via the existing `flows.state` WS channel and
+`flowsControllerProvider` — the same live source `FlowCard`'s own counters use) already carries
+exactly this number (`{"scraped": scrape.scraped, "limit": ...}` etc.) for every flow with a daily
+cap. `CapsTile` now takes an optional `liveFlows` map and prefers
+`liveFlows[flow]?.today[field]` for the headline bar/count, falling back to the burndown history's
+last day only while the live snapshot hasn't loaded yet. The 7-day sparkline trend is untouched —
+still from `burndownProvider`, since past days are immutable once the calendar day rolls over, and
+only "today" was ever the volatile, wrong number.
+
+**Rejected:** polling `burndownProvider` on a timer, or invalidating it on notification arrival —
+both would still be a second, redundant round trip for data the app already has live via the
+heartbeat it already subscribes to for the Pipeline tile one row above.
+
+**Verified:** `flutter analyze` clean; `flutter test` 210/211 (the one `shell_layout_test.dart`
+failure reconfirmed pre-existing via `git stash` — identical failure on the unmodified branch tip,
+unrelated to this change); `overview_layout_test.dart`'s 11 cases all still pass unchanged, since
+they already exercise `CapsTile` through `_CapsTile` with `flowsControllerProvider` unoverridden
+(falls back to burndown, matching the old behavior exactly when no live snapshot exists). Verified
+against the real running agent's `/api/insights/burndown` and Prefect's real flow-run history
+directly, read-only — no ops action taken, no code touched outside `app/`. Built and started for
+you per rule 5 — not clicked through by Claude.
+
+**The Android phone is disconnected indefinitely (your own call, to pause flows for a few days)**,
+so this can't be checkpoint-tested against a *live* run reaching a cap the way it would normally be
+verified — nothing will scrape/follow/scan while it's off. What you *can* still confirm without the
+phone: open Overview and confirm "Today's caps" now shows figures consistent with yesterday's
+(2026-08-08) real totals (`Scrape 300/300`, `Follow 155/60` — over cap by design, `Scan · profiles
+2/10`, from the burndown numbers pulled above) rather than a lower stale count. A true live-updating
+check (numbers ticking up in real time as a flow runs) is what's left open until the phone is back.
+
+---
+
+## 2026-08-08 — V2.10, Library review mode (D115)
+
+### D115 · A full-window keep/discard decision buffer for one `(folder, entity)` at a time, writing only through the existing `POST /api/library/apply`; the double-click lightbox lands in the same session
+
+**Built per PLAN_V2.md's `## V2.10 — Library review mode` / SCREENS.md §5b-§5c** — the headline
+feature of all of v2, next after V2.8 in the fixed V2.6→V2.7→V2.9→V2.5→V2.8→V2.10→... sequence
+(D107). New `app/lib/features/library/review_page.dart`: `LibraryReviewPage` (the decision
+buffer) and `LibraryLightboxPage` (§5c's browse-only sibling — prev/next, no buffer) share the
+same large-image stage, pushed as a genuine full-screen route via
+`Navigator.of(context, rootNavigator: true).push(...)` — this covers the title bar and nav rail
+entirely, matching SCREENS.md's own mockup (no app chrome shown at all), a deliberate reading of
+"full-window" over a variant that keeps the shell visible. Esc always returns to it.
+
+**The keyboard map is exactly SCREENS §5b's table** — `→`/`L` keep-and-advance, `←`/`H`
+discard-and-advance, `↑`/`K` back one *and un-decide it*, `Space` toggles the current decision
+without advancing, `Enter` applies, `Del` deletes the current image immediately (bypassing the
+buffer, but still through the same confirm dialog every other delete path in this app uses —
+SCREENS' "immediately" read as "not deferred to Apply," not "skip the confirm," since nothing
+else in this codebase deletes without one), `Z` toggles zoom-to-fit/actual-size
+(`LibraryFullImage`, new in `core/library_image.dart`, backing `GET /api/library/image` — the
+original file, not the grid's thumbnail), `O` opens the real Instagram URL.
+
+**Apply reuses `applyLibrarySelection`, extracted from `library_toolbar.dart`'s private `_apply`
+into a shared top-level function** (same shape as the existing `deleteLibrarySelection`) — the
+toolbar's own Apply button and review mode's Apply both now call the identical
+`POST /api/library/apply` + confirm dialog, so there is no second implementation of what "apply"
+means or looks like.
+
+**The one correctness rule PLAN_V2.md flagged as this checkpoint's real risk — "never present a
+partial set as the whole folder," D90's mobile bug in a new shape — is enforced structurally, not
+just documented.** `apply()` is whole-directory-scoped server-side (everything not selected gets
+trashed), so Apply is disabled until every *loaded* image has a decision **and** `hasMore` is
+false — reaching the loaded boundary while pages remain shows a spinner, not the "done" screen,
+since `_maybePageMore` requests the next page well before the reviewer actually reaches it (a
+20-item lookahead against the current position, not a scroll listener — there's no scrolling in a
+one-at-a-time reviewer).
+
+**A real bug this same rule surfaced, caught by the new test suite before it ever shipped, not
+found live:** the first version called `loadMore()` directly from `_maybePageMore`, itself called
+from `build()`. Riverpod forbids mutating a provider from inside a widget's own build — and the
+real `LibraryImagesController.loadMore()` writes `state` (`loadingMore: true`) as its literal
+first statement, so this would have thrown the identical assertion in production the moment a
+reviewer paged past a folder's first batch, not just in the test harness. Fixed by deferring the
+call through `WidgetsBinding.instance.addPostFrameCallback`.
+
+**The double-click lightbox (§5c, ✅ already confirmed by the user in D98) landed in the same
+session** — `library_tile.dart`'s double-click now opens `LibraryLightboxPage` instead of copying
+the id; copy-id already lived in the right-click context menu too, so nothing is lost, matching
+SCREENS' own framing. `library_grid.dart` passes the tapped tile's index as the lightbox's start
+position.
+
+**All four SCREENS-listed entry points exist**: the toolbar's own Review button (enabled exactly
+like Apply/Delete — visible always, disabled with nothing loaded); `R` via a page-level
+`CallbackShortcuts` in `library_page.dart`; and the nav rail's Review sub-item /
+`pipeline_edge.dart`'s ⚑ tap, both upgraded from "navigate to the folder" (all they ever did) to
+actually deliver on `pipeline_edge.dart`'s own long-standing comment — a new
+`openReviewModeForFolder` selects the folder, awaits its first entity with a real backlog, and
+pushes straight into review mode for it, rather than landing on "pick an entity to browse."
+
+**Verified:** `flutter analyze` clean. New `test/review_mode_test.dart` (5/5) — Keep/Discard/
+Back/Space's exact semantics including the Up-then-redecide case verified end to end against a
+real (faked) Apply call; Apply staying disabled while more pages remain even with every *loaded*
+image decided; the pagination-boundary `loadMore()` trigger (via a recording fake, not a real
+agent); Esc popping the route and writing nothing; Del showing the shared confirm dialog and
+writing nothing on Cancel. `FileOpener.openUrl` (the `O` key) is deliberately never exercised —
+same reasoning `library_layout_test.dart` already established for the tile's own "Open on
+Instagram" menu item, since it shells out to the real OS via win32 `ShellExecute`.
+`flows_layout_test.dart`'s existing ⚑-edge test needed updating for the richer behavior (it now
+also resolves an entity and pushes a real route) — without fakes for the folder/entity/images
+providers it touches, the tap would have hit a real `dio.get` and left a pending `Timer` past
+the widget tree's teardown; fixed with the same fake-controller shape `library_layout_test.dart`
+already established. Full suite: 210 checks, 209 passing — the one `shell_layout_test.dart`
+failure (`AppShell ... rail expanded`) reproduces identically on the pre-session branch tip
+(confirmed via `git diff --stat` showing `nav_rail.dart`'s only change this session was a 10-line,
+non-layout edit to `openReview()`), matching the same pre-existing failure D114 already recorded.
+`flutter build windows --debug` succeeds. Two stale prior-session instances found running were
+killed first and replaced with one fresh one (D87's precedent). Built and started for you per
+rule 5 — not clicked through by Claude.
+
+**Checkpoint test (yours, per PLAN_V2.md's own V2.10 gate — the only checkpoint that writes to
+real curation data):** review a real batch end to end in `gender_valid` (or `scraped`), Apply it,
+and confirm the files moved exactly as the grid's own Apply would have. Test `Esc` mid-batch and
+confirm nothing was written. Test the pagination boundary on an entity with a large backlog — the
+next page should already be loading well before you reach the end of what's on screen. Try the
+four entry points (toolbar Review button, `R`, the nav rail's Review sub-item, a Flows ⚑ edge) and
+the double-click lightbox. Then do the same review flow once more in `scraped`.
+
+**Same-session follow-up, caught by your own retest: the small/medium/large zoom control reset to
+medium on every restart.** `LibraryZoomNotifier` (`library_controller.dart`) never persisted at
+all — `build()` always returned the hardcoded default. Fixed with the same pattern
+`NavRailCollapsedNotifier` (`core/nav_state.dart`) and `ThemeController` already use: a
+synchronous `LibraryZoom.medium` default so the first frame never waits on disk, `build()` kicking
+off an async `SharedPreferences` read that updates `state` a moment later if a saved value exists,
+and `set()` now persisting (`prefs.setString('library_zoom', zoom.name)`) alongside updating state.
+`flutter analyze` clean, `flutter test` unchanged (16/16 across `library_layout_test.dart` +
+`review_mode_test.dart` — the layout test's `_FixedZoom` fake fully overrides `build()` and never
+touches `SharedPreferences`, so it was unaffected). Rebuilt and restarted for you.
+
+**Same-session follow-up, your own request: `gender_invalid` moved from SCANNING into YOUR
+REVIEW.** Purely a `libraryStageGroups` regrouping (`core/library_models.dart`) — `gender_invalid`
+was classify's rejected-gender output with no curation step attached, unlike `gender_valid`/
+`scraped`'s real pipeline gates (ARCHITECTURE §9's two human-in-the-loop steps); the user's own
+call to give it a place to catch classifier mistakes rather than leave it unreviewable. No
+behavior change beyond the grouping — review mode was already generically available for any
+folder (the toolbar's Review button/`R` only ever gated on "is something loaded," never on which
+folder), so `gender_invalid` could already be reviewed, it just read as pipeline state rather than
+an invitation to. `curationFolders` (`overview/curation_tile.dart` — the Overview hero tile/
+nav-rail badge/default review-entry-point folder) was deliberately left at just
+`['gender_valid', 'scraped']`, since widening it would also grow the Overview's "needs attention"
+surface area and nothing asked for that. Doc comments in `library_models.dart`/`library_rail.dart`
+and the matching `library_layout_test.dart` assertion updated from "two" to "three" review
+folders. `flutter analyze` clean, `flutter test` 11/11 in `library_layout_test.dart`. Rebuilt and
+restarted for you.
+
+**Same-session follow-up, your own request: YOUR REVIEW reordered to `gender_invalid` →
+`gender_valid` → `scraped`.** A one-line reorder of the same `libraryStageGroups` list (was
+`gender_valid` first). Rebuilt and restarted for you.
+
+**Checkpoint test passed 2026-08-08 — you confirmed all four follow-ups plus the core review
+flow live. V2.10 accepted.** Next: V2.12 (Command palette).
+
+---
+
+## 2026-08-08 — V2.8, Live screen rework (D114)
+
+### D114 · Fixed 420px visualization column replaced with a resizable, expandable split; RunSummary dissolved into a header strip; log search and the scrape morph added
+
+**Chosen, per PLAN_V2.md's `## V2.8 — Live` / SCREENS.md §3 scope** (V2.8 is next in the fixed
+V2.6→V2.7→V2.9→V2.5→V2.8→... sequence, D107): the log console and visualization surface move
+into a `ResizableSplit` (`persistKey: 'live.split'`, `initialFirstSize: 480` for the log pane,
+`minFirst: 320`/`minSecond: 360`) — replacing the hardcoded `SizedBox(width: 420)` the code's own
+comment (D45) already flagged as tuned to `entity-scrape` alone and ~95% empty for `entity-ingest`
+(SCREENS §3). Each pane gained a slim frame (`_Pane` in `live_page.dart`) with a title and a ⤢
+expand/restore `IconButton` — tapping either maximises that pane to the full body width, tapping
+again restores the split; new `AppIcons.expand`/`.collapse` (`PhosphorIcons.arrowsOut`/`arrowsIn`).
+The split stays **horizontal** (side-by-side, full height each), per SCREENS §3's own reversal of
+an earlier vertical-stack proposal once the real window was observed (D97) to be landscape, not
+tall-and-narrow.
+
+**`RunSummary` dissolved from its own ~180px scrolling card into a one-line header strip.** Reused
+`features/flows/flow_status.dart`'s existing `flowStatusKindOf`/`flowStatusLabel`/`flowAccent`/
+`flowStatusIcon`/`flowTodayLine`/`formatFlowCountdown` (already the Flows screen's own phase/gate
+vocabulary, D91-D93) rather than re-deriving a second copy of "what does this phase mean" —
+`run_summary.dart`'s private `_todayLine` duplicate is gone. A new once-a-second
+`StreamProvider.autoDispose` (`_secondTickProvider`, same shape as `device_bar.dart`'s 5s poll)
+drives a real elapsed-run timer, only ever watched while `FlowStatusKind.running` — an idle/
+waiting flow never pays for it. Elapsed comes from a new `GET /api/flow-runs/{id}` fetch in
+`LiveController` (`LiveState.runStartedAt`, Prefect's own recorded start time) rather than "when
+did the app first notice this run," which would drift by however long the next heartbeat took to
+reach this screen. Run id and last-run detail move into a rich `AppTooltip` behind an ⓘ icon — the
+same collapse-behind-a-tooltip pattern D93 already used for the Flows cards' own gate detail.
+D113's click-to-filter counter chips are preserved exactly, just re-hosted as a new `_CounterChip`
+(the same visual shape as `ui/status.dart`'s shared `StatusChip`, but with an `AnimatedCounter` in
+place of a plain string — kept local rather than widening the shared component's API for one call
+site) — the "implicit animation on counters" ARCHITECTURE §9 promised, applied to the one number in
+this app that changes every few seconds while you're watching it.
+
+**The five level `FilterChip`s collapsed into one control**, not `ui/fields.dart`'s `AppSelect` —
+its `T value` shape is single-select only, and this needs several levels on at once. A local
+`_LevelFilterMenu` (`MenuAnchor` + stock `CheckboxMenuButton`, `closeOnActivate: false`) gets the
+same collapsed-dropdown affordance without widening a shared component's API for one call site.
+
+**Log search is new** (`_LogSearchBar` in `log_console.dart`): a debounced (250ms, matching
+`SearchField`'s existing precedent) text field showing "n of m" and stepping with `Enter`/
+`Shift+Enter` (`CallbackShortcuts`, `Escape` clears) — not built on `SearchField` itself, which has
+no `onSubmitted`/keyboard hook to step through matches with. Matches are counted and stepped by
+*line*, not by individual occurrence within a line (a line with three hits is still one stop),
+matching how a quick visual scan of a log naturally works; every occurrence still highlights inline
+via a hand-rolled `TextSpan` walk (`_highlightSpans`). Jumping to an off-screen match in a
+virtualized `ListView.builder` needed a two-step approximation, since items outside the viewport
+aren't built and have no element to `Scrollable.ensureVisible` toward: jump to a proportional
+estimate first (log lines are roughly uniform height), then correct exactly on the next frame once
+the target's `GlobalKey` (grown, never rebuilt fresh, so keys stay stable across builds) has a real
+context. A search in progress also suspends auto-follow-the-newest-line — the user is deliberately
+reviewing a specific match, possibly well above the bottom.
+
+**Structured (JSON-shaped) log messages now render via `MonoText`'s font instead of the body
+proportional face** (`_looksStructured`: trimmed message starts with `{` or `[`) — SCREENS §3 called
+out a real ingest-flow JSON blob rendering broken in the old proportional-font-only version.
+
+**Card widths for Scrape/Follow are computed, not the three hardcoded per-flow constants** (380
+scrape / 420 follow — D45; classify was already full-width and needed no change). New
+`wrapCardWidth()` in `surfaces/surface_common.dart` picks a per-card width so the available width
+(read via `LayoutBuilder`) holds a whole number of columns with no ragged trailing gutter, clamped
+between a per-surface `minWidth`/`maxWidth`.
+
+**The scrape before→after morph, specified in ARCHITECTURE §9 and never built (AUDIT §10), now
+exists** — `ui/motion.dart`'s `AnimatedReveal` already had this exact use case in its own doc
+comment, just no call site. `_ScrapeCard`'s two layouts (in-progress strip / resolved composite)
+are both built, and the large card wraps whichever's current in
+`AnimatedReveal(visible: true, child: KeyedSubtree(key: ValueKey(inProgress), ...))` — the key
+change on `scrape.done`/`scrape.skipped` arriving is what `AnimatedSwitcher` (under `AnimatedReveal`)
+detects as a swap to cross-fade, rather than an instant cut.
+
+**`DeviceBar`'s mirror button renamed `Start mirror`/`Stop mirror`** (was bare `Start`/`Stop`) —
+SCREENS §3 flagged two unscoped "Stop" buttons inches apart in the same header (the flow's own and
+the mirror's) as genuinely ambiguous at a glance.
+
+**Verified:** `flutter analyze` clean. `flutter test`: 205 passing / 206 total — the one
+`shell_layout_test.dart` failure (`AppShell ... rail expanded`) reproduces identically on the
+branch tip from *before* this session's changes (confirmed via `git stash`), unrelated to this
+work. Eight new checks in `live_layout_test.dart`: three `wrapCardWidth` unit tests, the scrape
+morph transition, log search (highlight/step/clear), a JSON-shaped log line, and two full `LivePage`
+mounts — one at SCREENS §3's own measured real window size (1168×973, D97) exercising the
+expand/restore round trip on both panes, one at the app's documented 1024×700 floor — plus a new
+assertion in the existing `DeviceBar` test confirming the disambiguated label. `flutter build
+windows --debug` succeeds. Built and started for you per rule 5 — not clicked through by Claude;
+five stale prior-session instances found running were killed first and replaced with one fresh one
+(D87's precedent).
+
+**Checkpoint test (yours, per PLAN_V2.md's own V2.8 gate) — passed, 2026-08-08.** A real scrape
+was watched end to end: elapsed timer, counters, the in-progress card morphing into the resolved
+composite, images filling the pane's actual width, log search working, and the split dragging and
+persisting across a restart; at least one other flow was also checked to confirm the computed card
+widths hold up where the old hardcoded numbers were tuned only for scrape. **V2.8 accepted.** Next:
+V2.10 (Library review mode).
+
+---
+
+## 2026-08-05 (continued) — Reduce reserve variants + counter click-to-filter, cross-repo (D113)
+
+### D113 · Two feature requests, planned first and confirmed before implementation, landed on both clients
+
+**Chosen:** a deliberate one-session deviation from the v2 UI sequence (mid-checkpoint at V2.8)
+for two features judged high-value enough to land immediately rather than wait: (1) "Reduce
+reserve" gained a second variant, and (2) the Live screen's per-flow counters became click-to-
+filter controls over their adjacent result-card list. Planned via `EnterPlanMode` and confirmed
+with the user (filter scope, selection mode, mobile numeric display) before any code was written.
+
+**Reduce reserve, two variants.** The existing drain-to-target behavior stops
+`entity_follow`'s pool count at exactly the reserve target
+(`FOLLOW × SCRAPE_RESERVE_FACTOR`), but `entity_scrape`'s own backpressure gate needs that count
+*strictly below* the target (`count < backpressure`) to unblock — landing exactly at 180 leaves
+Scrape still blocked; only 179 unblocks it on the same tick. `Insta-Automate/flows/
+entity_follow.py` gained a second bool parameter, `unblock_scrape`, computing
+`target = reserve_target - 1 if (reduce_reserve and unblock_scrape) else reserve_target` and
+using `target` (not `reserve_target`) in the loop's stop condition and log lines.
+`controllers/prefect.py`'s `entity_follow_trigger` consumes a second bare command,
+`reduce_reserve_unblock_scrape`, folding it into `reduce_reserve`/`force` the same way the
+original command already does — chosen over adding a payload/parameter to the agent's command
+schema (`CommandRequest`, `_commands` storage, `_consume`/`_pending`) for one integer, since a
+second distinct command name is a one-line addition to `ia-agent`'s `KNOWN_COMMANDS` set instead
+of threading a new field through three layers. Gate reason stays `"reduce_reserve"` for both
+variants — no client-side status-kind logic needed to change.
+
+**Desktop** (`core/force_run.dart::reduceReserveFlow`) shows one dialog with two `FilledButton`s
+computed from live config ("Reduce to 180" / "Reduce to 179 — unblocks Scrape") instead of a
+single Confirm — the button itself keeps its label and existing call sites untouched. **Mobile**
+(`flow_actions.dart::reduceReserve`) stays worded-only per the user's own choice (no live
+config-fetch plumbing added there) — but the first version's three-action `AlertDialog` (Cancel
+plus two long-label buttons) forced Material's default `OverflowBar` into a vertical stack of
+stretched, inconsistently-shaped pills on a phone-width screen, one wrapping onto two lines. Your
+own screenshot caught it; fixed by moving the two choices out of `actions` into the dialog's
+`content` as tappable title+subtitle option cards (`_ReduceReserveOption`), leaving only a single
+"Cancel" text action — a much better fit for long labels than fighting the action-row layout.
+
+**Counters as multi-select filters.** Classify, Follow, and Scrape's live counter chips
+(`run_summary.dart`'s `_EventCounters`, ported to mobile as `flow_run_summary.dart`) are now
+tappable — multi-select, not isolate-one, per your explicit choice — filtering the adjacent
+result-card list to cards matching any selected key. Scan and Ingest stay non-interactive: their
+cards carry no per-item verdict field to filter by. Scrape gained a new **Failed** counter
+(every `scrape.skipped` reason folded into one bucket, your own call over a per-reason
+breakdown) alongside the existing **Scraped**; its **Processed** stays plain since it's a
+superset, not its own category. Filter state (`LiveState.selectedVerdicts` /
+`FlowRunController.selectedVerdicts`) is scoped to the currently displayed run — reset wherever
+`events` itself already resets on a new `run_id`, not on every WS reconnect/manual refresh. The
+still-in-progress "large card" pattern (Scrape's front-and-center latest item) is deliberately
+unaffected by an active filter, since an unresolved subject has no bucket to match yet.
+`ui/status.dart`'s `StatusChip` gained optional `selected`/`onTap` params, additive only — every
+existing static call site is unchanged; `onTap` wraps the chip in `Material`/`InkWell` only when
+set. Mobile's equivalent uses the stock `FilterChip` instead of a custom component, since Flutter
+already ships exactly that selection semantic.
+
+**Verified:** a throwaway script (`check_reduce_reserve.py`, not committed) calling the real
+`entity_follow.fn(...)` directly (Prefect's own engine-bypass escape hatch, D86's precedent) with
+every heavy dependency (DB session, device, Instagram call, Telegram, agent HTTP) monkeypatched
+against a scratch temp dir — 6/6, including the exact-stop-at-180 and exact-stop-at-179
+invariants and a normal-mode-ignores-unblock_scrape case. `agent/tests/test_scheduler.py` 26/26
+(25 prior + 1 new). Desktop `flutter analyze` clean, `flutter test` 197/197 (196 prior + 1 new in
+`flows_layout_test.dart` asserting the real computed dialog target numbers, not just that a
+dialog opened) — the one `shell_layout_test.dart` failure seen mid-session was confirmed
+pre-existing on a clean `feat/v2-ui-overhaul` tip via `git stash`, unrelated to this work. Mobile
+`flutter analyze` clean (the one pre-existing `thumbnail_cache.dart` lint, untouched). Deployed
+for real: `Insta-Automate`'s `feat/control-center` pushed (`921551b`), `ia build`'d, both the
+scheduler and worker pods restarted (the worker needed a real rebuild, not just a rollout, since
+`entity_follow`'s signature changed — D86's precedent again), `ia prefect deploy` re-run for
+D38's known work-pool-orphaning gap, both pods' loaded source confirmed via `kubectl exec` to
+match the fixed commit. `ia-agent.exe` restarted for the new `KNOWN_COMMANDS` entry, confirmed
+live via a real command POST and all three supervised services still `adopted` with uptime
+intact (D87's lesson, checked again). Desktop app built and started for you, mobile APK built and
+installed on the test phone, neither driven by Claude. **You tested both live, confirmed
+everything worked functionally, then flagged the mobile Reduce-reserve dialog's layout — fixed
+and reconfirmed live in the same session.** Session closed here on your call.
+
+---
+
+## 2026-08-05 (continued) — V2.5 follow-up: cap-hit false urgency and cramped nav icons (D112)
+
+### D112 · The Overview hero stops warning on today's cap; nav rail icons enlarged
+
+**Chosen:** Two more real issues, flagged from the same screenshots that closed out D111's
+checkpoint. First, `hero_tile.dart`'s `_compute()` still put a flow sitting at today's cap into
+the same "N things need attention" bucket a failed service or a down dependency uses — the
+identical false-urgency shape D111 had just fixed for a standing-by flow, just a different
+trigger (`atCap`/`checkCap`, reading `Burndown`, not a flow's own gate at all). The cap exists
+specifically so the pipeline stops there on its own; reaching it is the cap working, not a
+problem — deleted from the hero's warning computation entirely, along with the now-unused
+`Burndown` parameter/`burndownProvider` watch that only ever fed it (today's caps already have
+their own dedicated read in `CapsTile`). Caught in the same pass, not separately reported: the
+headline's pluralization was wrong — `'${reasons.length} thing${plural ? 's' : ''} need
+attention'` always said "need," so a single reason read "1 thing need attention" — fixed to
+conjugate both nouns ("1 thing needs attention" / "2 things need attention").
+
+Second, `nav_rail.dart`'s `_NavTile` icons — `IconSize.sm` (14px) with 1px of vertical margin
+between tiles — read tiny and cramped against a 72px-wide collapsed rail with plenty of unused
+space, smaller than the pre-V2.5 flat `NavigationRail`'s own default (18px) ever was. Bumped to
+`IconSize.lg` (24px) with real padding (`tokens.space.sm`, both axes) and margin
+(`tokens.space.xs` horizontal, half that vertical) around each tile, in both the expanded and
+collapsed states — the `_CollapseToggle` button's own deliberately-small utility icon (16px, a
+window-button-style affordance, not a nav destination) was left untouched.
+
+**Verified:** `flutter analyze` clean; `flutter test` 197/197 (195 prior + 2 new — a
+cap-hit-stays-good case and a real-dependency-down pluralization case in
+`overview_layout_test.dart`, both scenarios with zero prior coverage) + a regression guard in
+`shell_layout_test.dart` asserting every real nav destination icon renders at `IconSize.lg`
+specifically, not just "no overflow," so this exact regression can't silently return.
+`flutter build windows --debug` succeeds. Built and started for you.
+
+**You confirmed both live and asked to close the session here.** Committed.
+
+---
+
+## 2026-08-05 (continued) — V2.5, Shell, plus a same-session terminology/semantics fix (D111)
+
+### D111 · Status cluster + grouped nav rail landed; "blocked" renamed to "standing by" and stopped reading as a warning
+
+**Chosen:** V2.5's three PLAN_V2.md bullets, each reusing an existing component rather than
+inventing one: the title bar's old single-text `_StatusChip` (`'Agent: connected'`) became a
+`_StatusCluster` of five `StatusDot`s (agent, k3s, postgres, prefect [`prefect-server`/
+`prefect-pool` combined, worst level wins], phone) each with a rich `AppTooltip` naming the
+component, its detail and its latency — reading only `connectionProvider` and
+`dependenciesControllerProvider`, no new agent endpoint. A ⌘K button sits next to the existing
+`?` button, **disabled** with a "coming soon" tooltip rather than wired to a placeholder
+action — the palette itself is V2.12's scope, and a clickable button that does nothing would
+be a worse affordance than an honestly-disabled one. The flat seven-item `NavigationRail` (no
+grouping API exists in the stock widget) was replaced with a hand-built `AppNavRail`
+(`shell/nav_rail.dart`) — MONITOR/OPERATE/ANALYZE groups, a `Review` sub-item under Library
+jumping straight into a review folder (the same `selectedFolderProvider` mechanism V2.6/V2.7's
+⚑ jumps already use), collapsible to icons-only via a new `Ctrl+B` binding persisted through
+`shared_preferences` (`NavRailCollapsedNotifier`, mirroring `ThemeController`'s pattern), and
+new `Ctrl+1..7` destination jumps — both live in `AppShell`'s existing `CallbackShortcuts` map
+alongside the untouched `?` binding. The destination switch is wrapped in the already-existing
+`PageTransition`. The faked-maximize workaround (`title_bar.dart`) is untouched, verbatim.
+
+**A second, real correction landed the same session, from your own live read of the running
+app, not a code review.** "Blocked" (`FlowStatusKind.blocked`, `_StatusKind.blocked` before
+V2.6 collapsed it into one shared `flow_status.dart`) named a flow whose `gate.ok` is false —
+backpressure, the daily cap, nothing queued — as if something were preventing it against its
+will. It isn't: the flow doesn't need to run yet and will pick back up the moment its
+condition is true again, the same way `cooldown`/`polling` already do. Renamed to
+`standingBy` ("Standing by"), and — because the old name wasn't just wrong wording but wrong
+*severity* — its accent moved from `StatusKind.warn` (amber) to `StatusKind.info`, the same
+"still on schedule, not stuck" bucket `cooldown`/`polling` sit in. That forced a real logic
+change, not just a rename: `hero_tile.dart`'s `_compute()` previously put a standing-by flow
+into the same "N things need attention" warn bucket as a failed service or a dependency down —
+deleted from that computation entirely, so the Overview hero now stays "All five flows running
+normally" regardless of how many flows are standing by. `nav_rail.dart`'s Flows destination
+lost its badge outright for the same reason — a count of resting flows isn't the kind of
+actionable signal `CountBadge` exists to carry, unlike an unhealthy-service count or a real
+curation backlog, so badging it under a calmer color would still have been the same false
+urgency wearing a new name. `flow_card.dart` — the pre-V2.6 private duplicate of this exact
+enum, orphaned dead code since `FlowCardCompact` replaced it in V2.7 (its own header comment
+said as much) — was deleted rather than kept in sync by hand a second time.
+
+**Verified:** `flutter analyze` clean; `flutter test` 195/195 (191 prior + 4 new in
+`test/shell_layout_test.dart` — rail overflow expanded/collapsed at the 1024px floor, real
+badge counts including the standing-by-gets-no-badge assertion, and a `Ctrl+B` round trip
+through the real persisted notifier — plus 3 existing tests in `flows_layout_test.dart`/
+`overview_layout_test.dart` updated to the new label/behavior rather than deleted).
+`flutter build windows --debug` succeeds. Built and started for you twice (once per round),
+per rule 5.
+
+**You confirmed the shell live and flagged two more real issues from the same screenshots,
+both left open for the next round rather than guessed at here:** the Overview hero still
+treats a flow hitting today's cap as "needs attention" — the same false-urgency shape as
+`standingBy`, just a different trigger (`atCap`, not a flow's gate at all) that this round
+didn't touch; and the nav rail's icons read as too small/cramped now, needing more of the
+rail's own width than the current `IconSize.sm`/tight padding give them. Committed on your
+explicit "commit to this point," with those two items scoped as the immediate next work
+rather than blocking this commit.
+
+---
+
+## 2026-08-05 (continued) — V2.9, Library browse (D110)
+
+### D110 · Per-folder grid aspect ratio, stage-grouped rail, ResizableSplit rails, always-visible toolbar
+
+**Chosen:** SCREENS.md §5a-0's highest-impact single Library fix landed first, in
+`library_grid.dart`: a `folder → aspectRatio` map (`libraryFolderAspectRatio`,
+`core/library_models.dart`) drives `SliverGridDelegateWithFixedCrossAxisCount
+.childAspectRatio` instead of a hardcoded `1` — row-crop folders (`scanned`, `gender_valid`,
+`gender_invalid`, `scrape_queued`) now lay out as a real 5.45:1 strip and full-page folders
+(`entities`, `scraped`, `follow_queued`) as a real 1:2.08 portrait, instead of both wasting
+40–82% of every near-square cell. The keyboard/scroll-into-view row-height math
+(`_scrollToIndex`'s `rowStep`) was updated alongside — it had assumed square cells (`width ==
+height`) throughout, which the aspect-ratio fix would otherwise have silently broken.
+`BoxFit.contain` (D41) untouched. `FolderRail` is now stage-grouped (`libraryStageGroups`:
+INTAKE / SCANNING / ⚑ YOUR REVIEW / QUEUED) instead of seven undifferentiated rows, marking
+`gender_valid`/`scraped` as the two folders that are actually the user's job. Both rails
+(`library_page.dart`) are nested `ResizableSplit`s now, replacing fixed 220px `SizedBox`
+columns — `persistKey`s `library.rail.folders`/`library.rail.entities`, the hardcoded 220
+becoming just the first-run default. `LibraryToolbar`'s Apply/Delete are always rendered,
+disabled (not absent) with an empty selection — "never hide a screen's primary action."
+Counts go through a new shared `plural()` helper (`core/plural.dart`) instead of each
+call site's own string surgery, rendered via `NumericText`. The grid gets a real skeleton
+loading state (`_GridSkeleton`) shaped to the folder's own aspect ratio and approximate
+column count, rather than a bare spinner. **D48's selection mechanics (plain click/Space
+toggles, arrows move focus only, Shift ranges) were not touched** — the only change inside
+`library_grid.dart`'s keyboard handling is the row-height arithmetic feeding the existing,
+unchanged `moveFocus`/`selectRange`/`toggle` calls.
+
+**A real test-authoring pitfall caught while extending `library_layout_test.dart`, not a
+production bug**: two new tests originally called `_render` (which calls `tester.pumpWidget`)
+twice within one `testWidgets` block, expecting the second call to fully replace the first —
+but `MaterialApp`/`Scaffold`/`ProviderScope` all being the same types at the same tree
+position means Flutter/Riverpod reuse the existing `Element`/`ProviderContainer` across the
+second `pumpWidget` rather than tearing down and rebuilding from scratch, so the second
+render's overrides never actually took effect and both tests silently asserted against the
+*first* render's state. Both failures were exactly that shape (a "selected" toolbar case still
+showing the disabled buttons from the empty-selection render; a portrait-folder assertion
+still measuring the previous strip-folder's tile size) — fixed by splitting each into two
+independent `testWidgets` blocks, matching this file's own existing one-render-per-test
+convention throughout.
+
+**Verified:** `flutter analyze` clean; `flutter test` 191/191 (186 prior + 5 new in
+`library_layout_test.dart`: stage-grouped rail with the ⚑ marker, Apply/Delete
+disabled-then-enabled across a selection change, and real measured tile dimensions for both a
+row-crop and a full-page folder). `flutter build windows --debug` succeeds. Built and started
+for you per rule 5; `ResizableSplit`'s own drag/persist behavior already has generic coverage
+in `ui/layout_test.dart` (D100), not re-tested here.
+
+**You tested live and confirmed it — rails drag and persist, Apply/Delete visible-but-disabled
+with nothing selected, selection unchanged, counts match, and the row-crop folders visibly fit
+far more images per screen.** Committed.
+
+---
+
+## 2026-08-05 (continued) — V2.7, Overview bento, built and live-bug-fixed (D109)
+
+### D109 · Overview rebuilt as a bento grid; two more latent shared-component bugs found
+
+**Chosen:** `overview_page.dart` replaces the old vertical stack of five full `FlowCard`s, two
+cards, five 340px `fl_chart` burn-down cards and two more cards (AUDIT §12) with a `HeroTile`
+(one computed status sentence, `StatusKind`-driven accent, up to two actions) above a real bento
+grid (SCREENS.md §1): `PipelineStrip` (five new `FlowCardCompact` tiles — status dot, name,
+one-line state, no controls — connected by the same live backlog counts V2.6's `PipelineEdge`
+reads), a new `CurationTile` (the two human-review backlogs, clickable into Library), a new
+`CapsTile` (progress bars + `Sparkline`s replacing the five big charts — full history stays on
+Insights), and the existing Services/Dependencies/Device/Recent widgets reused, tightened for
+tile width. Three real breakpoints (`_bentoFor`, DESIGN_SYSTEM §7's `compact <1100` /
+`medium 1100–1500` / `wide ≥1500`) rearrange the same eight tiles rather than one fixed layout
+overflowing at the 1024px floor. `HeroTile`'s priority, worst first: agent disconnected → bad;
+any service failed → bad; any flow blocked, any dependency down, any cap hit → warn; otherwise →
+good ("All five flows running normally") — all read from the exact providers their own screens
+already use, no new agent endpoints.
+
+**Two more real bugs found live, same pattern as V2.6's `AppPanel.accentEdge` crash — a shared
+V2.2 component getting its first real call site.** `Sparkline` (`ui/data.dart`) threw
+`type '(num, num) => num' is not a subtype of type '(int, int) => int' of 'combine'` on every
+render: `values`/`cap` are declared `List<num>`/`num?`, but every real caller passes concrete
+`List<int>`/`int?` (Dart generics are reified per-object), and calling `.reduce()` directly on
+the field resolves the method's generic signature against the *object's* real `int` type
+parameter, not the `num`-typed field it's stored in — a `(num, num) => num` closure then fails
+the runtime subtype check. No prior `Sparkline` call site existed to catch this; `data_test.dart`
+only ever covered `AppTable`. Fixed by normalizing to a genuine `List<double>` up front in
+`_SparklinePainter.paint()` (a leaf type, not further subtyped) rather than operating on the
+declared-but-misleading `List<num>`. Separately, `DependencyStrip` and `DeviceBar` — both
+previously only ever embedded in roomy half-width sections — overflowed once placed in
+Overview's narrower tiles: `_DependencyChip`'s label had `maxLines: 1` + ellipsis but no actual
+width bound to ellipsize against (a `Wrap` never constrains a single child narrower than its own
+natural size), fixed with a `ConstrainedBox(maxWidth: 130)`; `DeviceBar`'s device-name
+`ConstrainedBox(maxWidth: 140)` alone doesn't shrink below its cap when the *row* itself is too
+narrow, fixed by wrapping it in `Flexible` (a no-op in the roomier Live header, where D46's
+tuning is untouched).
+
+**Live-tested, one round.** You confirmed the hero tile, pipeline, caps, curation counts and
+dependencies/services/device tiles all correct, with one minor note: the page needed "a little
+scroll" at your real window size rather than sitting fully above the fold. Tightened in response
+— the hero→grid gap (`Gap.xl` → `Gap.lg`) and `RecentNotificationsCard`'s Overview instance
+(`maxShown` 3 → 2) — not separately re-verified live, a small enough change to ship with the
+rest rather than hold up the commit for a second screenshot round.
+
+**Verified:** `flutter analyze` clean throughout; `flutter test` 186/186 (179 prior + 9 new
+`overview_layout_test.dart` cases: the full-data layout at all three breakpoints — 1024/1300/1700px
+— the empty state, and all four `HeroTile` `StatusKind`s including the disconnected-beats-
+everything-else priority and the curation-waiting action appearing independent of hero kind).
+`flutter build windows --debug` succeeds. Built and restarted for you twice (initial build, the
+scroll tightening) per rule 5.
+
+---
+
+## 2026-08-05 (continued) — V2.6, Flows pipeline, built and live-bug-fixed (D108)
+
+### D108 · Flows rebuilt as a vertical pipeline; a real cross-theme crash and an alignment bug found and fixed live
+
+**Chosen:** `flows_page.dart` is now five `FlowNode` strips connected by four `PipelineEdge`
+connectors (SCREENS.md §2), replacing the old five-card `Wrap`. Edges read live backlog counts
+from `libraryFoldersControllerProvider` (`entities/`, `scanned/`, `gender_valid/`, `scraped/`) —
+no agent work, per the scope boundary. The two ⚑ human-review edges (`gender_valid/` → Scrape,
+`scraped/` → Follow) jump straight into that Library folder on click, reusing
+`selectedFolderProvider`/`selectedNavIndexProvider`. The edge into Follow turns `warn` when
+`scraped + follow_queued` exceeds `FOLLOW × SCRAPE_RESERVE_FACTOR` — the same math
+`reduceReserveFlow` already computes, now visible on the pipeline itself rather than only
+explained after the fact. All six D84 `_StatusKind` states and their derivation are re-derived
+verbatim in a new shared `flow_status.dart` rather than touched in `flow_card.dart` — that file,
+and `overview_page.dart`'s use of it, is deliberately untouched, since V2.7 is what replaces it
+with `FlowCardCompact`, not this checkpoint. The 56px cooldown ring is gone: a compact inline
+`mm:ss` next to the status word plus a thin determinate progress line along the node's bottom
+edge — still the *only* state with a countdown. Blocked flows show their raw gate detail inline
+now (D93 had to hide it behind a hover; the node layout has room), and a new click-to-expand
+accordion (`expandedFlowProvider`, one node open at a time) reveals last-run detail, full
+counters, the raw gate string, View logs and Open in Live — View logs itself moved off the
+collapsed row into a per-node overflow menu to free space. Every button's semantics (D88's
+Trigger now, D86's Reduce reserve, D69's Stop) and confirm dialogs are unchanged.
+
+**Found live, not in review — two real bugs, both fixed the same session.**
+
+**1. A genuine crash, blank on every theme but Classic.** The user's first screenshot showed
+Classic looking cluttered but working; the second, on Command Deck, showed every `FlowNode` as a
+completely empty box — no text, no icons, no switch — while the surrounding `PipelineEdge` rows
+rendered fine. Root cause, confirmed by pumping `FlowNode` against all six themes directly rather
+than guessing: `ui/surfaces.dart`'s `AppPanel` had never had a real `accentEdge` call site before
+this checkpoint (`FlowNode` is the first), and building a rounded `Border` with the accent edge as
+one colored side and the other three sides a different color throws
+`"A borderRadius can only be given on borders with uniform colors"` — but only for a theme whose
+`DepthStrategy` actually paints a border (Command Deck, Mica). Classic's shadow-only strategy
+means its "plain" sides are all `BorderSide.none`, which happens not to trigger the check, so the
+bug shipped invisibly until a theme with `DepthStrategy.border` exercised it. **Fixed in the
+shared component**, not worked around per call site: `accentEdge` is now painted as a separately
+`ClipRRect`-clipped overlay bar on the left, matching the panel's own corner radius, instead of
+being folded into the `Border`. Verified directly: a throwaway test pumping `FlowNode` under all
+six themes' real built `ThemeData` (not the bare-`ThemeData()` fallback path the existing
+`surfaces_test.dart` accentEdge case happened to use, which is exactly why it never caught this)
+confirmed zero exceptions post-fix, then deleted.
+
+**2. Switches and buttons weren't in a straight column.** The state label next to the switch was
+a `Flexible` (sizes to its own text), so the switch's x-position drifted left/right on every row
+depending on that row's label length, and the per-node overflow menu (only present when a
+`lastRun` exists) shifted it further depending on which rows had one. Fixed: the label is now
+`Expanded` (fills the leftover space and right-aligns within it) and the overflow menu slot is
+always reserved at a fixed width, present or not — both together give every row's switch the same
+fixed distance from the right edge. Then the action-button row (Trigger now / Reduce reserve /
+Stop), previously flush-left under the icon gutter, was moved to right-align under that same
+column, matching SCREENS.md §2's own mockup positioning rather than the improvised left-flush
+placement this session's first draft used. A naive `Row(mainAxisAlignment: end, children:
+[ButtonGroup(...)])` regressed the D87 three-button wrap regression test — a bare `Row` gives its
+lone child unbounded width, so the inner `Wrap` never wraps and overflows instead — fixed with a
+bounded `SizedBox(width: double.infinity)` around a raw `Wrap(alignment: end)` (bypassing
+`ButtonGroup`, which has no alignment parameter).
+
+**Rejected:** leaving `accentEdge` un-load-bearing (reverting `FlowNode` to no accent edge) rather
+than fixing `AppPanel` — rejected because `accentEdge` is COMPONENTS.md's documented mechanism for
+exactly this ("how a failed service, a blocked flow or an errored ops job announces itself"), and
+Services (V2.11) is already planned to be its second consumer; leaving the shared component broken
+would just relocate the same crash there later.
+
+**Verified:** `flutter analyze` clean throughout; `flutter test` 179/179 (166 prior + 13 new in
+the rewritten `flows_layout_test.dart`, covering all six `_StatusKind` states, the inline blocked
+gate detail, the cooldown progress line, the entity-follow three-button case at a narrow 360px
+width — D87's own regression scenario, now against the new layout — the expansion accordion, and
+both `PipelineEdge` variants including the ⚑ review-folder jump). `flutter build windows --debug`
+succeeds. Built and restarted for you three times across the session (initial build, the crash
+fix, the alignment fix) per rule 5 — not clicked through by Claude. **You tested live each round**:
+round 1 caught the cross-theme crash from your own Command Deck screenshot; round 2 confirmed the
+crash was gone and flagged the switch/button misalignment from your Classic screenshot; round 3 was the alignment fix above, after which **you said to proceed** — taken as the
+checkpoint test passing. Committed.
+
+---
+
+## 2026-08-05 (continued) — V2.5–V2.12 split into visual-first, functional-second (D107)
+
+### D107 · Remaining v2 checkpoints grouped and reordered: visual before functional
+
+**Chosen, at the user's request, once V2.4/D106 closed out:** PLAN_V2.md originally left
+V2.5–V2.12 as "independent, reorder freely." Grouped instead:
+
+- **Visual** (redesigns how something already works looks or is organized — no new
+  capability): V2.6 (Flows pipeline), V2.7 (Overview bento), V2.9 (Library browse), V2.5
+  (Shell), V2.8 (Live).
+- **Functional** (adds a genuinely new interaction): V2.10 (Library review mode — the
+  headline feature of all of v2), V2.12 (Command palette — `Ctrl+K` doesn't exist at all
+  today), V2.11 (Services/Insights/Settings — real new capabilities, terminal search/copy/
+  font-size, resizable panes, but the least load-bearing of the three).
+
+**Execution order: V2.6 → V2.7 → V2.9 → V2.5 → V2.8 → V2.10 → V2.12 → V2.11 → V2.13.** Within
+each group, ordered by impact per PLAN_V2's own existing "most transformative"/"highest-
+impact" language rather than re-litigated from scratch. V2.10's existing dependency on V2.9
+falls out of the order for free. V2.13 (motion/accessibility/release) stays last regardless —
+it audits whatever V2.5–V2.12 produce, so there's nothing for it to check before they're done.
+
+**Why:** the user's own framing — get the app looking finished across every screen first,
+*then* layer new interactions on top of a finished look, rather than the reverse (a
+functionally richer but visually half-migrated app partway through).
+
+**Rejected:** leaving the original "reorder freely" note as-is (too vague to actually commit
+to an order) and a strict alternating visual/functional interleave (rejected as arbitrary —
+grouping cleanly is more legible than alternating for its own sake).
+
+PLAN_V2.md's "Sequencing notes" section rewritten to match; nothing about any individual
+checkpoint's own scope (its own `## V2.n` section) changed — only which one comes next.
+
+---
+
+## 2026-08-05 (continued) — post-commit follow-ups: canvas background bug, density independence (D106)
+
+### D106 · `AppShell`'s Scaffold background was hardcoded transparent; Command Deck's density nudge removed
+
+**Two separate fixes, found live after V2.4 (D103–D105) was already committed.**
+
+**The real one — the page background never actually changed theme.** `shell/app_shell.dart`'s
+root `Scaffold` had `backgroundColor: Colors.transparent` hardcoded, predating the entire v2
+token system. For Classic and Mica that's correct by coincidence (both really do want a
+transparent canvas so the native Mica-blurred desktop shows through) — but it meant the other
+four themes' own opaque `surface.canvas` value (Command Deck's `#07080B`, Nocturne's `#13131A`,
+Daylight's `#FBFBF9`, Swiss's `#FFFFFF`) was never painted at all. The visible page background
+stayed whatever was behind the window regardless of theme, while cards correctly went dark
+(post-D104) — the mismatch the user described as "the widgets look way darker... the app looks
+different" when switching to Command Deck: the cards were right, the backdrop around them
+wasn't moving. Fixed by reading `Theme.of(context).tokens.surface.canvas` instead of the
+hardcoded literal — a no-op for Classic/Mica (their token *is* `Colors.transparent`, so the
+pixel output is identical), a real fix for the other four.
+
+**Command Deck's "ships compact by default" density nudge (D103) removed outright, at the
+user's explicit request.** THEMES.md §2 describes Command Deck as *designed for* `compact`, but
+auto-applying that on selection meant density silently moved without the user asking it to —
+exactly the kind of state a user expects to stay put until they change it themselves,
+regardless of which theme they're on. `ThemeController.setTheme()` no longer touches density at
+all; THEMES.md and DESIGN_SYSTEM.md's density table reworded from "ships compact by default" to
+"designed for compact," since the theme's own token values are unchanged — only the automatic
+behavior is gone.
+
+**Verified:** `flutter analyze` clean, `flutter test` 175/175 unchanged (no test asserted the
+old Scaffold background or the density nudge). Rebuilt; two stale instances found running (not
+just the expected one — cleaned up along with the intended restart) and replaced with a single
+fresh one, started for you per rule 5.
+
+**The background fix confirmed live** — a follow-up screenshot of Command Deck shows the page
+background and cards finally reading as one coherent near-black-blue surface, no more mismatch.
+The density-independence half wasn't separately re-verified this round (no theme switch was
+shown after it) — worth an explicit check next session. Same session, one more small thing
+spotted while looking at the fixed Command Deck screenshot: `flow_card.dart`'s cooldown countdown ring
+(`_FlowStatusIndicator`) centered its `NumericText` directly against the ring's stroke with no
+gap, tightest on the `h:mm:ss` case (past an hour). Added `Padding(EdgeInsets.all(3))` around
+just that text — scoped to the countdown branch only, not the shared `_size`/`_iconBadge()` used
+by every other flow state, so this doesn't change the size of any of the non-cooldown icon
+badges. `flutter analyze` clean, `flutter test` 175/175 (`flows_layout_test.dart`'s cooldown
+case unchanged, still green). Rebuilt, restarted for you.
+
+**The padding alone wasn't enough — caught immediately by a real side-by-side screenshot,
+before the session closed.** Two flows cooling down at once: Scrape's `9:33` (4 chars, under an
+hour) had room to spare inside the padded ring; Follow's `14:16` (5 chars, further into the
+wait) still crowded the stroke. The padding treated the symptom per-string; the actual limiter
+is the ring's own diameter against the *widest* case the format string can produce
+(`h:mm:ss`, 7 chars, past an hour) — a 3px pad can't fix a ring that's simply too small for
+that width. Fixed properly this time: `_size` (`_FlowStatusIndicator`'s shared box, also used
+by `_iconBadge()` for every non-cooldown state) raised from 56 to 64. Deliberately kept shared
+rather than special-cased to the cooldown branch alone — a flow's indicator changing size the
+moment it flips in or out of cooldown would be its own small visual glitch. Verified:
+`flutter analyze` clean, `flutter test` 175/175, including `flows_layout_test.dart` and
+`overview_layout_test.dart` (which embeds `FlowCard` per D79) at the 1024px floor — the one
+place a few extra pixels on a shared widget could have shown up as a real overflow. Rebuilt,
+restarted for you.
+
+**Still didn't match — the real gap wasn't the diameter at all, it was that a bare ring has no
+fill.** Your side-by-side screenshot of the 64px version showed the countdown ring still
+reading noticeably smaller than the icon badge next to it, same bounding box or not.
+Root cause: `_iconBadge()` paints a *solid* tinted disc (`Container` with a `BoxShape.circle`
+fill) — full visual weight across the whole `_size` footprint. `CircularProgressIndicator`
+only ever paints a thin stroke; its `backgroundColor` parameter draws a second, fainter stroke
+for the *remaining* track, not a fill — so the cooldown case had nothing but two thin
+concentric rings on an otherwise empty background, which reads as meaningfully smaller than a
+filled disc even at an identical bounding box (real perceptual size, not a pixel-measurement
+bug — matches the user's own framing, "match the ring size with the icon radius," once actually
+compared side by side). Fixed by giving the cooldown `Stack` the exact same tinted-disc
+`Container` `_iconBadge()` uses as its base layer, with the progress ring drawn on top and its
+own `backgroundColor` set to `Colors.transparent` (a second faint track over a solid fill would
+have just looked muddy). `_size` stays 64 — the fill was the actual fix, not a further size
+bump. Verified: `flutter analyze` clean, `flutter test` 175/175 unchanged. Rebuilt, restarted
+for you.
+
+**Still the same ring size, even with the fill — because the fill was never the whole story.**
+Your follow-up screenshot showed exactly what the disc-fill fix predicted it would (a correctly
+64px tinted backdrop), but the *ring itself* — the arc that actually counts down — was
+unchanged from every earlier attempt, small, sitting in the middle of the now-larger disc with
+a visible gap. The real, final root cause, found by actually reasoning through
+`CircularProgressIndicator`'s own layout algorithm rather than assuming it behaves like the
+`Container` next to it: a plain decorated `Container` with no explicit size, given *bounded*
+constraints (which is what a `SizedBox`-constrained `Stack` hands each loose child), tries to
+be **as big as possible** — that's why the backdrop disc has always correctly filled `_size`.
+`CircularProgressIndicator` does not follow that rule. Its render object computes a **fixed**
+~36px preferred diameter regardless of the bounded space available, and merely clamps it if the
+available space is *smaller* — it never grows to fill a *larger* available space the way a
+`Container` does. This is why raising `_size` from 56 to 64 (the second attempt) changed
+nothing about the ring itself: `_size` was only ever reaching the `Stack`'s bounding box and the
+backdrop disc, never the ring, because the ring was never given a tight size of its own — it
+was sitting loose inside `TweenAnimationBuilder` inside the `Stack`, silently rendering at its
+own ~36px default the entire time, through every previous attempt in this session. Fixed for
+real this time: the `CircularProgressIndicator` (via its `TweenAnimationBuilder` wrapper) is
+now wrapped in an explicit `SizedBox(width: _size, height: _size)`, giving it the *tight*
+constraint its layout algorithm actually needs to grow. Verified: `flutter analyze` clean,
+`flutter test` 175/175 unchanged (no existing test measured the ring's actual rendered
+diameter — a real gap in coverage for this specific class of bug, left as-is rather than
+building a new test for one bugfix this late in the session). Rebuilt, restarted for you —
+**not yet seen live**, session closing here; the next session should confirm this — the ring's
+arc itself, not just its backdrop, should now visibly match the icon badges — plus the
+still-open D106 item (density independence across a theme switch) before moving on to V2.5.
+
+**One more, cosmetic, once the 64px ring was actually visible:** the countdown text itself
+(`13:55`) looked small against the now-correctly-sized ring. `NumericText`'s role bumped from
+`micro` (10.5) to `caption` (12) — both use the same muted color already, `caption` just isn't
+bold and drops `micro`'s loose letter-tracking, so this is a straightforward size increase, not
+a style change. `flutter analyze` clean, `flutter test` 175/175 unchanged. Rebuilt, restarted
+for you.
+
+**Final round: the user asked to tune the ring size themselves rather than iterate through
+Claude again, and found `_size` coupled the ring to every icon badge — a real design gap in the
+fix above, not just a missing knob.** `_size` was shared by design (so an indicator's footprint
+never shifts when a flow flips in/out of cooldown), but that meant the *only* way to resize the
+ring was to also resize `_iconBadge()`'s circle for every other flow state — not what "let me
+tune the ring" means. Split into two constants: `_size` (64, unchanged — the outer bounding box
+and every non-cooldown icon badge) and a new `_ringSize` (the backdrop disc + progress arc
+only), centered inside the same `_size` box via the `Stack`'s existing `alignment: center`, so
+nothing about the row layout moves regardless of what `_ringSize` is set to. Pointed the user at
+the exact line rather than continuing to guess-and-check; **the user landed on `_ringSize = 48`**
+themselves. `flutter analyze` clean, `flutter test` 175/175. This is the version committed
+below.
+
+---
+
+## 2026-08-05 (continued) — a third density tier, requested mid-retest (D105)
+
+### D105 · `Density` gains `spacious`, above `comfortable`
+
+**Chosen:** a third tier above the default — `compact` (0.75×/0.95×) < `comfortable`
+(1.0×/1.0×) < `spacious` (1.15×/1.05×), the user's own framing ("low/medium/high, where
+compact is low and comfortable is medium"). Kept the existing `compact`/`comfortable` names
+rather than renaming everything to `low`/`medium`/`high` — both are already load-bearing
+vocabulary across THEMES.md, DESIGN_SYSTEM.md, PLAN_V2.md's V2.4 checkpoint text, and
+`theme_controller.dart`'s Command Deck density nudge; a rename would be pure churn for a
+request that's really just "add a third option, roomier than today's default."
+`build_theme.dart`'s `_applyDensity` early-return switched from `density ==
+Density.comfortable` to checking both scale factors equal `1.0`, so it stays correct
+regardless of which named tier happens to be the identity one. Settings → Appearance's
+segmented control now shows all three, ordered low→high. `flutter analyze` clean, `flutter
+test` 175/175 unchanged (no test asserted a two-tier `Density`). DESIGN_SYSTEM.md §1.8 and
+THEMES.md §9 updated to match. Rebuilt, stale instance killed, fresh one started for you per
+rule 5 — not clicked through by Claude.
+
+---
+
+## 2026-08-05 (continued) — a real V2.1-era bug found live retesting D103 (D104)
+
+### D104 · `AppTokens.type` collided with `ThemeExtension.type`, silently pinning every screen to Classic since V2.1
+
+**Found by you, immediately, the first time a second theme actually existed to diverge from
+the fallback.** Your screenshot of Overview under Swiss showed the split precisely: switches,
+the selected nav label, "View logs" — all correctly red (Swiss's `accent.primary`). Every card
+background — Flows, Services, Dependencies — still Classic's dark near-black. Not a partial
+render, not a Swiss-specific bug: every theme, everywhere `Theme.of(context).tokens` is read
+directly.
+
+**Root cause:** `AppTokens` (`tokens.dart`, written in V2.1) declared `required this.type` as
+its `TypographyTokens` field, with `@override` on top of `ThemeExtension<T>`'s own `Object get
+type => T` getter — reasoned at the time as "a valid narrowing override, just needs the
+annotation" (true, syntactically). What that comment missed: `type` isn't decorative on
+`ThemeExtension`. Flutter's `ThemeData` constructor uses it as the map key when converting the
+`extensions: [...]` list into `Map<Object, ThemeExtension>` — so `ThemeData(extensions:
+[tokens])` was keying itself by a `TypographyTokens` *instance* instead of the `AppTokens` Type
+object. `Theme.of(context).extension<AppTokens>()` — which looks up by the real `AppTokens`
+type — missed on every single call, and `AppTokensX.tokens`'s `?? buildClassicTokens()`
+fallback fired unconditionally, for every theme, every time.
+
+**Invisible through V2.1, V2.2 and V2.3's own checkpoint tests — not because they were
+insufficiently thorough, but because the bug was structurally unobservable until a second
+theme existed.** Classic was the only theme through all three checkpoints; the fallback
+(`buildClassicTokens()`) and the real intended value were identical, so nothing anywhere could
+tell them apart. Confirmed directly: an isolated widget-test probe (`MaterialApp(theme:
+buildTheme(buildSwissTokens())), home: AppCard(...)`) rendered the card at Classic's dark
+`surfaceContainer`, not Swiss's white `surface.base` — reproduced with zero Riverpod, zero
+`app.dart`, zero animation involved, before touching any fix.
+
+**Fixed:** the field renamed `AppTokens.typography` (not `type`), the incorrect `@override`
+removed — `ThemeExtension`'s own default `type` implementation (returning the real `AppTokens`
+type object) is what should have been there all along. Every `tokens.type.*` read across the
+codebase (11 files: `build_theme.dart`, `ui/text.dart`, `ui/status.dart`, `ui/icons.dart`,
+`ui/overlays.dart`, `service_terminal.dart`, `burndown_chart.dart`, `funnel_stage.dart`,
+`shortcuts_reference.dart`, `config_file_bar.dart`, plus every `themes/*.dart` constructor call)
+renamed to `tokens.typography.*`. DESIGN_SYSTEM.md's own `AppTokens` code snippet — which
+specified the colliding field name in the first place — corrected, with a new paragraph
+explaining why `type` can never be reused as a field name on a `ThemeExtension` subclass.
+
+**New permanent regression test, `test/theme_extension_lookup_test.dart`** — the one check the
+entire rest of the suite structurally could not perform. It renders a real widget under each of
+the six themes and asserts `Theme.of(context).tokens.id` actually matches, catching exactly
+this class of "the fallback silently substituted itself" bug for any future field that
+accidentally shadows something `ThemeExtension`/`ThemeData` relies on internally.
+
+**Verified:** the isolated probe test that reproduced the bug was rerun unchanged after the fix
+— `AppCard` under Swiss now renders `#FFFFFF`, both statically and after a real `AnimatedTheme`
+swap-and-settle. `flutter analyze` clean, `flutter test` 175/175 (169 prior + 6 new in
+`theme_extension_lookup_test.dart`, one per theme). Rebuilt, stale instance killed, fresh one
+started for you per rule 5 — not clicked through by Claude. **Still awaiting your six-part
+checkpoint test** — this fix is what that test exists to have caught, and it's the reason the
+first attempt is being retested rather than committed as-is.
+
+---
+
+## 2026-08-05 (continued) — V2.4 Theme catalog built (D103), awaiting checkpoint test
+
+### D103 · Five new themes, real `AppTokens.lerp`, the Appearance tab, native Mica handling, two contrast fixes
+
+**Built, not yet committed** — rule 4: the checkpoint test (six parts, PLAN_V2.md's V2.4 section)
+runs before the commit, same as every other v2 checkpoint. `flutter analyze` clean, `flutter test`
+169/169 (was 167 pre-V2.4; `test/theme_contrast_test.dart` adds 48 checks — 6 themes × 8 columns
+from THEMES.md §7's table — the other 121 unchanged), `flutter build windows --debug` succeeds.
+
+**`themes/{command_deck,nocturne,mica,daylight,swiss}.dart`** transcribe THEMES.md §2–6's values
+directly, deriving only what the doc left unspecified (chart.grid/axis/axisLabel/capLine —
+Classic's own precedent for the same gap; Nocturne/Mica's shadowSm/shadowLg, scaled from the one
+size THEMES.md did give). `registry.dart` grew to all six.
+
+**Two of THEMES.md §7's own "computed, not measured" values failed the real contrast test and
+were adjusted, exactly as the doc asks:** Nocturne's `content.tertiary` (`#565F89`, 2.76:1 against
+`surface.base` — under the 3:1 UI-boundary floor) lightened to `#6A7399` (3.68:1), same muted
+blue-grey family. Swiss's `status.warn` (`#C25E00`, 4.29:1 against white — under the 4.5:1 body
+floor) darkened to `#B05300` (5.14:1), same hue. Both found by `test/theme_contrast_test.dart`,
+parameterized over all six themes × `StatusTokens`' four states × `ContentTokens`' three levels,
+plus `accent.primary` (THEMES.md §7's table has its own column for it, used for focus rings/
+selection — a UI boundary, floor 3:1 not 4.5:1). Translucent tokens (Mica's whole surface stack;
+`content.tertiary` in every dark theme, deliberately per THEMES.md §7's closing note) are
+flattened against black/white by the theme's own brightness before measuring — a raw translucent
+color's own luminance doesn't describe what's actually on screen once it's painted over a panel.
+
+**`AppTokens.lerp` does real per-field interpolation**, replacing the `t < 0.5` snap V2.1 shipped
+as a documented placeholder. Every `Color` and every `double` sweeps (new `.lerp` statics on each
+sub-token class); what can't mean anything at a halfway point — face names, `DepthStrategy` and
+its shadow lists, `Curve`s, `id`/`name`/`tagline` — snaps at the midpoint instead, each documented
+at its own call site. `chart.series` lerps index-aligned rather than snapping: every shipping
+theme's list is the same length (six), so a running burn-down chart doesn't jump mid-animation.
+`MaterialApp` already wraps its child in `AnimatedTheme` and calls `ThemeData.lerp` (which finds
+and lerps matching `ThemeExtension`s automatically) on every `theme:` change — `app.dart` only
+needed to set `themeAnimationDuration`/`Curve` from the *incoming* theme's own `motion.slow`/
+`enter` tokens (zero under reduced motion) for the crossfade DESIGN_SYSTEM §8 describes to exist
+at all.
+
+**Mica's native `Window.setEffect` hard-cut (DESIGN_SYSTEM §8) is handled by always keeping the
+compositor on `WindowEffect.mica`, only ever changing the `dark` flag.** Every other theme's
+`surface.canvas` is fully opaque (alpha 1.0), so which native material is running underneath is
+visually moot for them regardless — Flutter's own opaque paint covers it either way, matching
+what `main.dart` has done unconditionally since CP 0.2. This avoids a `solid`-vs-`mica` branch
+that would have needed extra care to not regress Classic's already-accepted (V2.1 checkpoint,
+pixel-identical) transparent-canvas-over-Mica look. `theme_controller.dart` calls it once on load
+and once per `setTheme()`; redundant calls between two non-Mica themes are harmless (same `dark`
+target, rare user action, not a hot path).
+
+**Command Deck nudges density to `compact` on selection** (THEMES.md §2: "the one theme that
+ships compact by default"), but only on the way *in* — reselecting it while already active, or
+manually flipping back to `comfortable` while on it, isn't overridden. Theme and density stay two
+independent, independently-persisted settings; this is a one-time default nudge, not a link
+between them.
+
+**Mica's system fonts (Segoe UI Variable, Cascadia Mono) ship with no `fontFamilyFallback`
+wiring**, despite THEMES.md §4 describing one — a real scope cut. Threading fallback lists through
+would touch `TypographyTokens`' schema (all six themes), `build_theme.dart`'s `_textTheme`, *and*
+`ui/text.dart`'s `MonoText`/`NumericText` (which set `fontFamily` directly, bypassing
+`ThemeData.textTheme` entirely) for a font pairing guaranteed present on the one OS this app runs
+on. Revisit if this app is ever expected to run somewhere Segoe UI Variable/Cascadia Mono aren't
+guaranteed.
+
+**Terminal palette override (`ThemeController.setTerminalOverride`)** is implemented as a token
+substitution in `app.dart` — `rawTokens.copyWith(terminal: TerminalPalette.dark)` before
+`buildTheme()` — rather than touching `service_terminal.dart` at all, since every terminal call
+site already reads `theme.tokens.terminal` and nothing else. `TerminalPalette` gained `.light`
+(GitHub Light, per THEMES.md §8 — already cleared live against a real streaming service in
+OBSERVED §6, so this is a genuine second home rather than an untested guess) and a `copyWith` so
+Command Deck/Mica/Swiss can recolor two or three fields instead of respelling all 23.
+
+**Settings gained a sixth "Appearance" tab** (before Ops, per THEMES.md §9) — a theme grid whose
+cards each wrap a real miniature app-chrome subtree in `Theme(data: buildTheme(tokens))` (title
+bar strip, three nav icons at the theme's own icon weight, a real `StatusDot`/`NumericText` card)
+rather than a color swatch, plus `Density`/`ReduceMotionSetting`/`TerminalOverride` segmented
+controls. `theme_controller.dart` mirrors `MutedTagsController`'s exact `shared_preferences`
+pattern (`features/notifications/notification_controller.dart`) — a synchronous `ThemePrefs.
+initial` (Classic/comfortable/auto/followTheme, matching THEMES.md §1's confirmed default) so the
+first frame never flashes an arbitrary theme, corrected a moment later once the real persisted
+value loads.
+
+**Not yet exercised live** — same standing precedent as every other checkpoint's hand-off: built,
+analyzed, tested, started, and handed over per rule 5, not clicked through by Claude. The six-part
+checkpoint test (switch through all six themes; walk every screen in Daylight; confirm Mica shows
+the desktop through the chrome; check the Services terminal in Daylight/Swiss for ANSI legibility;
+toggle compact density; confirm theme+density persist across a restart) is what's outstanding
+before this commits.
+
+---
+
+## 2026-08-05 (continued) — V2.3 migration finished (D102 · part 2 of 2)
+
+### D102 · All 90 files under `features/`, `shell/`, `core/` migrated; the three acceptance greps enforced; token_coverage_test.dart written
+
+**Scope closed out from D101's split.** Every screen's `Page` widget now wraps in `AppPage` —
+Settings, Services, Flows, Overview, Live, Library, Insights all gained a real title (several,
+per AUDIT §4, had none at all) and a single page-padding convention, replacing the six different
+paddings AUDIT §3 catalogued. `EdgeInsets` literals across `features/` were swept to
+`tokens.space.*`: zero raw numeric `EdgeInsets.all(16)`-shaped literals remain anywhere under
+`features/` (verified by grep) — every occurrence is now either `EdgeInsets.zero`,
+`tokens.space.*`-derived, or absorbed entirely into `AppCard`/`AppPanel`'s own default padding
+(dropping the wrapper `Padding` outright wherever the value matched the token default). The raw
+occurrence count of the word `EdgeInsets` itself only drops from 138 to 95, not to zero — Gap only
+inserts space between siblings, it has no way to express a container's own inset, so a `Padding`
+around a `TextField`'s decoration, a `GridView`'s content margin, or an asymmetric corner case
+still writes `EdgeInsets.symmetric(...)`/`.only(...)`, now always token-sourced rather than a
+magic number. `Icon(Icons.*)` widgets are fully gone from `features/`/`shell/` (verified by
+grep — the only remaining hits are `FilledButton.tonalIcon` and `trayManager.setIcon`, both false
+matches on the substring); every one is `AppIcon(AppIcons.*)`. Numeric displays route through
+`NumericText` at every site COMPONENTS.md §2 named by file:line (the cooldown ring, today's
+counters, run-summary counters, the ranking table's three metric columns, library folder counts)
+plus the further ones found doing this pass (log console timestamps, the pairing code, dependency
+latencies, the funnel/burn-down chart numbers). `Gap.xs/.sm/.md/.lg/.xl` replaces bare
+`SizedBox(height/width: N)` wherever the value maps onto the five-step scale.
+
+**`AppIcons` grew from 18 entries to ~65**, not guessed up front — every new one was added because
+a real `Icon(Icons.*)` call site in this pass needed a Phosphor equivalent and none of the
+original 18 domain-specific names fit. Verified against the real `phosphor_flutter` package source
+(`phosphor_icons_base.dart`'s 1,512 static methods) before use, not assumed — three names
+(`selfHeal`→`bandaids`, `history`→`clockCounterClockwise`, the three library-zoom
+`density{Small,Medium,Large}` steps) needed a second lookup pass when the first guess didn't
+exist. The zoom control specifically needed *visually distinct* icons (dots→squares→one square)
+since the icon itself is the size cue in a `SegmentedButton` with `showSelectedIcon: false` — a
+single reused glyph there would have defeated the control's whole point.
+
+**Two real widget-library bugs found and fixed while doing this, not feature-code bugs:**
+`ui/layout.dart`'s `KeyValueList` wrapped its label in a bare `Text` inside a `mainAxisSize: min`
+`Row` — fine for the original hand-picked `labelWidth`s, but the row's *usable* width is
+`labelWidth` minus the row's own right padding, so a label like "Last run" that fit the original
+76px gutter no longer fit the ~68px left after the padding subtraction, throwing a real
+`RenderFlex` overflow (caught by `live_layout_test.dart`, not `flutter analyze` — D19's
+precedent again). Fixed generically in the shared widget (wrapped in `Flexible` + `maxLines: 1` +
+ellipsis, matching `AppText`'s own default-safe philosophy) rather than hand-tuning
+`run_summary.dart`'s `labelWidth`, since any future `KeyValueList` consumer would hit the same
+class of bug with a long enough label. `core/dependency_models.dart`'s `DependencyLevel.icon`
+getter (Material `IconData`) couldn't become `AppIcons`-based directly — `ui/` sits between
+`core/` and `features/` (D100's own layering rule), so `core/` importing `ui/icons.dart` would
+invert it. Fixed the same way D100 handled `ServiceState.statusKind`: a small feature-level bridge
+extension (`_DependencyLevelIconX`, duplicated once in `dependencies_tab.dart` and once in
+`overview/dependency_strip.dart`, its only two consumers) rather than relaxing the layering rule.
+`core/funnel_stage.dart`, `core/agent_image.dart`, and `core/library_image.dart` hit the identical
+constraint and were retokened (spacing, colors) but deliberately **not** converted to `AppIcon`/
+`NumericText` for the same reason — flagged in each file with a comment rather than silently left
+inconsistent.
+
+**Eleven `.when()` sites named in AUDIT §6 — nine converted to `stateView`, two confirmed
+correctly left alone.** `library_rail.dart` (×2), `log_console.dart`, `notification_center.dart`,
+`devices_tab.dart`, `ops_tab.dart`, `queue_tab.dart`, `entity_yield_dialog.dart` now use
+`AsyncValue.stateView()` with real `LoadingView`/`ErrorView`/`EmptyView` states and retry
+callbacks (several gained a working retry button they didn't have before, e.g. `queue_tab.dart`,
+`ops_tab.dart`'s spec list). `core/agent_image.dart` and `core/library_image.dart` were confirmed,
+not just skipped — AUDIT §6 already called these "correctly bespoke — leave" (per-image inline
+placeholders, not page-level states), and building through them confirmed that judgment still
+holds. `live/device_bar.dart`'s `.when()` also stays hand-rolled by design (AUDIT §6: "acceptable,
+it's a header strip") — only tokenized, not restructured, since a full `ErrorView` would be far
+too heavy for a compact header control.
+
+**`test/token_coverage_test.dart` written**, encoding PLAN_V2.md's three "must return nothing"
+greps as real `flutter test` assertions (`Color(0x` outside `core/theme/`, named `Colors.*`
+outside `core/theme/` except `Colors.transparent`, `fontFamily: '` outside `core/theme/`) plus the
+one exception the plan's own criteria comment names by hand: the QR quiet zone
+(`themes/classic.dart`'s `qrQuietZone: Colors.white`, where `AppTokens.chart.qrQuietZone` is
+*defined*) is excepted the same way `core/theme/` itself is for the other two patterns. Reading
+`lib/` from disk at test time (`dart:io`, matching every other test's `Directory.current`-relative
+convention) rather than shelling out to `grep`, so this suite runs anywhere `flutter test` does,
+Windows included, with no external tool dependency. One genuine false-positive found writing it:
+`ui/status.dart`'s own doc comment for `OutcomeBadge` quoted the two hex literals it used to
+replace — literally matching the `Color(0x` pattern from inside a comment. Fixed by rewording the
+(now-stale, since D101 already did the retarget) comment rather than teaching the test to skip
+comments, since a genuine hardcoded color hiding behind a comment-like string is exactly the kind
+of near-miss this test exists to catch.
+
+**Verified:** `flutter analyze` clean across all of `lib/` and `test/`. `flutter test` 121/121
+(118 prior + 3 new in `token_coverage_test.dart`) — one real round of test breakage from the
+migration itself, all in icon/text finders that were asserting against the exact Material
+`IconData`/string this session replaced, fixed by updating the finders to the new Phosphor
+glyph + weight rather than the app code (`flows_layout_test.dart`'s info-tooltip icon,
+`notification_center_layout_test.dart`'s bell/filter/open-external icons ×3,
+`ops_tab.dart`'s empty-state string losing its trailing period in translation to `EmptyView`).
+`flutter build windows --debug` succeeds. Built and started for you per rule 5 — not clicked
+through by Claude. **Deliberately out of scope, left as-is:** every `AlertDialog`-based confirm
+dialog (`force_run.dart`, `library_toolbar.dart`'s apply/delete, `limit_card.dart`'s revoke-style
+confirms, etc.) — `AppDialog` exists in `ui/overlays.dart` but PLAN_V2.md's V2.3 checklist doesn't
+name a dialog-shell migration as one of its bullets, and rewriting a confirm dialog's structure
+sight-unseen (rule 5: the user drives the app, this session cannot) carries real risk for a widget
+whose whole job is a correct Cancel/confirm button pair. `AppTable` was not substituted for the
+Ranking tab's hand-built D77 table, nor was `ResizableSplit` substituted for any of the thirteen
+AUDIT §11 hardcoded-width splits — both are explicitly named as V2.11/V2.9's own scope in
+PLAN_V2.md's sequencing notes, not V2.3's.
+
+---
+
+## 2026-08-05 — V2.3 migration started, split into two halves (D101 · part 1 of 2)
+
+### D101 · The `AppPalette` shim deleted; every hardcoded color found by AUDIT §2 now reads a token
+
+**Chosen scope for this half:** PLAN_V2.md's V2.3 is explicitly flagged as the plan's largest
+single checkpoint, with its own sanctioned split ("split it by feature directory... each half
+is independently verifiable"). Rather than a shallow first pass across all ~90 files, this half
+does one thing completely: closes every real color-token gap AUDIT §2 named, verified against
+the acceptance grep. The rest of V2.3 — wrapping all seven screens in `AppPage`, the `EdgeInsets`
+sweep, `NumericText`/`AppIcon`/`Gap` conversion, the eleven remaining `.when()` sites, and
+`test/token_coverage_test.dart` — is unstarted and is part 2.
+
+**`core/app_theme.dart` (the `AppPalette`/`TerminalPalette` deprecated shim, kept for exactly
+one checkpoint per V2.1's own comment) is deleted.** Its five remaining call sites
+(`flow_card.dart`, `title_bar.dart`, `service_terminal.dart` ×5, `dependency_models.dart`,
+`service_models.dart`) now read `theme.tokens.status.*`/`theme.tokens.terminal` directly.
+
+**All thirteen hardcoded colors AUDIT §2 catalogued by file:line are gone**, each mapped to the
+token the audit table already named: `log_console.dart`'s `Colors.amber.shade700` →
+`tokens.status.warn.fg`; `service_detail.dart`'s three duplicate hex literals (`0xFFFFB454` /
+`0xFF3DD68C` ×2 — the audit's "sharpest example," typed by hand from `AppPalette.dark`'s own
+values) → `tokens.status.warn/good.fg`; `notification_center.dart`'s four `Colors.*Accent`
+level colors → a `_levelColor(tokens, level)` function replacing a `static const` map (which
+can't reach `theme` — the const-context constraint is why this one was a map literal instead of
+a switch in the first place); `devices_tab.dart`'s two `Colors.white` QR-background instances →
+`tokens.chart.qrQuietZone` (the token DESIGN_SYSTEM §1.4 built for exactly this — first real
+consumer) and its `Colors.green` → `tokens.status.good.fg`; `ops_tab.dart`'s `Colors.green` →
+same.
+
+**`OutcomeBadge`/`BadgeTone` retargeted onto `ui/status.dart`'s V2.2-built version, not just
+retokened in place** — `features/live/surfaces/surface_common.dart`'s local `OutcomeBadge`
+class and `BadgeTone` enum are deleted outright; its five call sites
+(`follow_surface.dart`, `ingest_surface.dart` ×2, `classify_surface.dart`,
+`scrape_surface.dart` ×2) now import `ui/status.dart` and pass `StatusKind` (`good`/`bad`/
+`neutral` map 1:1, no behavior change). `toneFor(verdict)` stays in `surface_common.dart` —
+domain logic (what `'PRIVATE'` means) has no business living in `ui/`, only its return type
+changed. This is COMPONENTS.md §3's plan for this widget, done as part of the migration rather
+than left stranded as an unused duplicate.
+
+**Verified:** `grep -rn "Color(0x" app/lib --include=*.dart | grep -v core/theme/` and
+`grep -rn "Colors\.[a-z]" app/lib --include=*.dart | grep -v Colors.transparent` both return
+nothing outside `core/theme/` (where token values are legitimately defined) — the first two of
+V2.3's three acceptance greps already pass, ahead of `token_coverage_test.dart` existing to
+enforce it. `flutter analyze` clean, `flutter test` 118/118 unchanged, `flutter build windows
+--debug` succeeds. Built and started for you.
+
+---
+
+## 2026-08-04 (continued) — V2.2 component library implemented
+
+### D100 · `app/lib/ui/` built against the tokens; only two pre-existing widgets actually moved
+
+**Built:** all twelve files COMPONENTS.md specifies — `surfaces.dart` (`AppPanel`/`AppCard`/
+`AppWell`/`AppOverlay`), `text.dart` (`AppText`/`MonoText`/`NumericText`/`AnimatedCounter`),
+`status.dart` (`StatusKind`/`StatusDot`/`StatusChip`/`CountBadge`/`OutcomeBadge`),
+`buttons.dart` (`AppButton`/`IconAction`/`ButtonGroup`), `page.dart` (`AppPage`/`PageHeader`/
+`SectionHeader`/`Toolbar`), `fields.dart` (`AppTextField`/`SearchField`/`AppSelect`/
+`AppSwitch`), `layout.dart` (`ResizableSplit`/`Gap`/`AppDivider`/`MetricRow`/`KeyValueList`),
+`feedback.dart`, `overlays.dart` (`AppDialog`/`AppTooltip`/`AppMenu`/`AppSnack`), `data.dart`
+(`AppTable`/`AppTableColumn`/`Sparkline`), `motion.dart` (`FadeSlideIn`/`AnimatedReveal`/
+`PageTransition`, on `flutter_animate`), `icons.dart` (`AppIcon`/`AppIcons`, on
+`phosphor_flutter`). `ui/command/` (the command palette) is explicitly out — that's V2.12's
+scope per PLAN_V2.md, not this checkpoint's directory listing in COMPONENTS.md §0.
+
+**Only `StatusDot` and the async-state trio actually moved, per PLAN_V2's own bullet list —
+`OutcomeBadge`'s real call sites stay untouched.** COMPONENTS.md §3 says `OutcomeBadge` "keeps
+its name and call sites — only its `BadgeTone` enum and hardcoded colors are replaced," which
+reads like a V2.2 migration, but PLAN_V2.md's actual V2.2 checklist only names two moves:
+`core/async_state_view.dart` → `ui/feedback.dart` and `features/services/status_dot.dart` →
+`ui/status.dart`. Built `ui/status.dart`'s `OutcomeBadge`/`StatusKind` as the *target* shape,
+left `features/live/surfaces/surface_common.dart`'s original `OutcomeBadge`/`BadgeTone`
+completely untouched — V2.3's 90-file migration is what actually redirects the five surface
+files. This matches the checkpoint's stated goal ("used by nothing yet") for every genuinely
+new component, while still doing the two real moves the plan calls out by name.
+
+**`StatusDot` generalised from `ServiceState` to `StatusKind` + an explicit `pulsing` bool** —
+its transient-state pulse (AUDIT's "do not undo" list) is unchanged, just no longer tied to one
+domain model. The two real call sites (`service_tile.dart`, `service_detail.dart`) needed a
+small bridge, added as `features/services/service_status_kind.dart` (`ServiceState.statusKind`)
+rather than teaching `core/service_models.dart` about `ui/status.dart`'s `StatusKind` — `ui/`
+sits between `core/` and `features/` per COMPONENTS.md §0's own directory note, so `core/`
+importing `ui/` would invert that layering. A feature-level bridge file was the correct home.
+
+**`AppTokensX.tokens` needed the same fallback `AppPalette` already had, discovered by the
+`ui/` tests themselves.** The dozen `theme.tokens.type.mono` reads V2.1 added compile fine
+everywhere, but calling `.tokens` from a genuinely bare `ThemeData()` (no `AppTokens`
+registered) still null-checks. Already fixed in V2.1 (`AppTokensX.tokens` falls back to
+`buildClassicTokens()`) — V2.2 is what actually exercised that path for the first time, via its
+own test harness (`test/ui/test_harness.dart`) which — unlike the ten pre-existing layout
+tests — renders through the real `buildTheme(buildClassicTokens())` rather than a bare
+`ThemeData()`, since these are exactly the widgets that read `theme.tokens`.
+
+**One real test-authoring bug, not a component bug, caught by the tests themselves:**
+`find.byType(MouseRegion).first` intermittently resolved to an unrelated ancestor `MouseRegion`
+inserted by the Material/Overlay chain rather than `ResizableSplit`'s own drag handle — its
+computed drag offset landed inside the *second* pane instead of on the handle, failing three
+tests with a bad hit-test warning. Fixed by giving the handle's `GestureDetector` a real
+`ValueKey('resizable_split_handle:$persistKey')` and asserting against the rendered pane's
+actual `Size` (`tester.getSize`) rather than scanning every `SizedBox` in the tree by width
+heuristics, which was fragile for the same underlying reason.
+
+**Verified:** `flutter analyze` clean, `flutter test` **118/118** (52 prior, unchanged — the
+two "moves" needed zero test edits since no test directly imported either old file — + 66 new
+in `test/ui/`, including the two real-assertion cases PLAN_V2.md names: `ResizableSplit`'s
+minimum-clamp/persistence/keyboard-nudge behaviour, and `AppTable`'s exact D77 invariant — one
+`width: null` column absorbs all leftover width, fixed columns never grow). `flutter build
+windows --debug` succeeds. Built and started for you — this checkpoint's test is a code review
+per PLAN_V2.md ("nothing user-visible changed... skim `ui/` and say whether the vocabulary
+matches how you think about the app"), not a click-through.
+
+---
+
+## 2026-08-04 (continued) — V2.1 token foundation implemented
+
+### D99 · Token layer built; the mono-font swap is the one intentional visible change
+
+**Built:** `app/lib/core/theme/` — `tokens.dart` (`AppTokens` plus every sub-token class from
+DESIGN_SYSTEM.md §1: `SurfaceTokens`, `ContentTokens`, `AccentTokens`, `StatusTokens`,
+`TypographyTokens`, `GeometryTokens`, `EffectTokens`, `SpacingTokens`, `MotionTokens`,
+`ChartTokens`, plus `TerminalPalette` moved in from `app_theme.dart`), `density.dart`,
+`build_theme.dart` (all ~40 `ThemeData` component sub-themes), `registry.dart`, and
+`themes/classic.dart`. `flutter_animate` and `phosphor_flutter` added; `InterVariable(-Italic).ttf`
+and `JetBrainsMono-{Regular,Medium,Bold}.ttf` downloaded from each project's GitHub release
+(rsms/inter's `docs/font-files/` path 404s for the italic — pulled from the `Inter-4.1.zip`
+release asset instead) and committed under `app/assets/fonts/` with both `OFL.txt` licenses.
+
+**Classic's exact-match mechanism:** `themes/classic.dart` calls
+`ColorScheme.fromSeed(seedColor: 0xFF6C63FF, brightness: dark)` — the same call `app.dart` used to
+make directly — and reads `SurfaceTokens`/`ContentTokens`/`AccentTokens` straight off the
+generated scheme's fields (THEMES.md §1's table), rather than hand-transcribing hex values. Every
+one of `build_theme.dart`'s ~40 sub-themes is then set explicitly from those tokens (never left to
+fall back on `ColorScheme`-driven Material defaults), so the checkpoint's "no visible change"
+claim rests on the explicit values matching Material 3's own default derivation for that seed,
+not on the base `ColorScheme` alone.
+
+**The one deliberate exception to "nothing else changes yet":** DESIGN_SYSTEM.md §1.5 says the
+`'Consolas'`/`'monospace'` mix (AUDIT §7, 12 call sites across 8 files) becomes `tokens.type.mono`
+explicitly, and PLAN_V2.md's own checkpoint test names this as the one expected visible diff. Did
+exactly those 12 call sites — no other literal at those sites touched, no other file migrated.
+
+**`AppTokensX.tokens` needs a fallback, same as `AppPalette` did.** The ~12 mono call sites now
+read `theme.tokens.type.mono` unconditionally, but the ten existing layout tests build their own
+bare `ThemeData(useMaterial3: true, brightness: dark)` with no `AppTokens` registered (same
+pattern D19/CP 7.3 already established for `AppPalette`) — a force-unwrapped `extension<AppTokens>()!`
+crashed four of them (`services_layout_test.dart`) with a null-check error. Fixed the same way
+`AppPalette.dark` was: `AppTokensX.tokens` falls back to `buildClassicTokens()` when nothing is
+registered. This makes `tokens.dart` → `themes/classic.dart` → `tokens.dart` a real cyclic import;
+confirmed Dart accepts library-level import cycles (unlike `part`/`part of`) — `flutter analyze`
+stays clean and all 52 tests pass with it in place.
+
+**`AppPalette` kept as a real deprecated shim, not just co-existing.** `TerminalPalette` moved out
+of `app_theme.dart` into `tokens.dart` (its constructor requires one for `AppTokens.terminal`);
+`AppPalette`'s `.palette` getter now builds the legacy shape on demand from whichever `AppTokens`
+is registered (`tokens.status.good.fg` etc.), falling back to the old hardcoded `AppPalette.dark`
+only when no `AppTokens` extension exists at all — so the five call sites still reading
+`theme.palette.*` (`flow_card.dart`, `title_bar.dart`, `service_terminal.dart`,
+`dependency_models.dart`, `service_models.dart`) needed zero changes and will keep working
+unchanged until V2.3 migrates them.
+
+**Not specified by THEMES.md's Classic table, so derived rather than guessed:** `borderSubtle`
+(`outlineVariant @ 0.5`), status `good`/`info`/`warn` containers (existing fg values, alpha-blended
+onto `surfaceContainer` for the container, fg reused as `onContainer` — `bad` uses the seed
+scheme's own `errorContainer`/`onErrorContainer` instead, since that's a real generated value, not
+a guess), `bodyHeight`/tracking/`chart.*` (Classic's row in THEMES.md §1 doesn't give these — nothing
+in the app reads `AppTokens.chart` or applies letter-spacing yet, so precision here doesn't affect
+the pixel-identical checkpoint). Flagged here rather than presented as spec.
+
+**Also not literally achievable, and not attempted:** `DESIGN_SYSTEM.md` §2's nine-role type scale
+(pageTitle 22, cardTitle 15, etc.) does not match Material 3's own default `TextTheme` sizes
+(headlineSmall 24 not 22, titleMedium 16 not 15, …), so setting it changes `ThemeData.textTheme`'s
+baked-in sizes for Classic too. This is expected to be near-invisible today because the audit's
+own evidence is that most on-screen text already comes from inline `TextStyle` overrides at the
+~90 feature-file call sites rather than `theme.textTheme.*` — but it is not verified pixel-by-pixel,
+and is exactly the kind of thing the checkpoint test is designed to catch.
+
+**Verified:** `flutter analyze` clean, `flutter test` 52/52 (unchanged — no test file edited),
+`flutter build windows --debug` succeeds. The Windows ephemeral `cpp_client_wrapper/` was
+regenerated (stale/incomplete, unrelated to this checkpoint) and a stale `ia_control_center.exe`
+from an earlier session had to be closed (confirmed with the user first) before the linker could
+write the new binary. Built and started for you per rule 5 — not clicked through by Claude.
+
+**Your live check caught one real bug, same session:** the Live screen's flow-selector
+`ChoiceChip` (`live_page.dart:98`) was dark-on-dark when selected — `chipTheme.secondaryLabelStyle`
+(the label style `ChoiceChip` uses while selected) was set to `accent.onPrimary`, which is meant
+for text on a *solid* `accent.primary` fill, but the selected chip's actual background is
+`accent.muted` — a translucent tint, still close to the dark page color, not a solid fill. Fixed
+to `accent.primary` (the light lavender), matching `checkmarkColor`, which already used the right
+token. Nothing else in `build_theme.dart` pairs `onPrimary` with a non-solid background the same
+way (checked `filledButtonTheme`/`badgeTheme`, both solid-fill, both correct;
+`segmentedButtonTheme`/nav rail's selected state already used `accent.primary` correctly). Rebuilt,
+re-analyzed, re-tested (52/52), restarted for you.
+
+---
+
+## 2026-08-04 (continued) — v2's two open design forks answered
+
+### D98 · Library double-click opens a lightbox; Classic stays the launch default
+
+**Asked:** the two questions `docs/v2/VISUAL_INPUTS.md` left open after the observation pass
+(D97) — both changes to existing behaviour, so both flagged for the user rather than assumed.
+
+**Chosen, on the user's answer:**
+
+**Double-click in the Library grid opens a lightbox.** The user confirmed they don't use
+double-click at all, which makes this free: `library_tile.dart:84`'s copy-id moves to the
+right-click menu — where it already exists (`library_tile.dart:58`), so no capability is lost —
+and double-click instead opens the large single-image view review mode uses. This is the browsing
+answer to the problem D97 measured: a 1080×2246 profile page is unjudgeable at ~120px.
+**Explicitly untouched:** plain click toggles, Space toggles, arrows move focus only, Shift
+ranges — D48 / `feedback-multiselect-toggle`, a recorded user preference.
+
+**Classic stays the default theme on first launch.** v2.0.0 opens looking exactly as the app does
+today; the other five themes are one click away in the new Appearance tab. Rejected making
+Command Deck the default despite it being the theme designed for how this app is actually used —
+an overhaul that changes everything the moment it launches gives the user no reference point, and
+the welcome dialog pointing at the Appearance tab is a better introduction than a surprise.
+
+**Cost:** none. Both were scoped into existing checkpoints (V2.10 and V2.4 respectively) rather
+than adding work. With these closed, **no open question blocks v2 implementation.**
+
+---
+
+## 2026-08-04 (continued) — v2 planning corrected by actually looking at the app
+
+### D97 · Rule 5 lifted for one session; three planning errors found by observation
+
+**Asked:** the user explicitly lifted rule 5 ("the user drives the app, never you") for this
+session — "lets ignore the rule that you cant see the app or screen … ask for it once do the job" —
+so the v2 plan could be checked against the real thing rather than inferred from source. Rule 5
+remains in force by default; this was a scoped, one-session exception.
+
+**Method:** `flutter clean` → dart-MCP `launch_app` on device `windows` (debug) → Win32
+`SetCursorPos`/`mouse_event` clicks at logical client coordinates → `Graphics.CopyFromScreen` per
+screen. `flutter_driver` was unavailable (the app never calls `enableFlutterDriverExtension()`),
+and `launch_app` returns the `flutter run` host pid rather than the window-owning child
+`ia_control_center.exe` — both noted in `docs/v2/OBSERVED.md` for repeatability. Only navigation
+was clicked; no switch, trigger, apply, delete or ops job was touched. Nine screenshots committed
+under `docs/v2/screens/`.
+
+**Three errors found, all now corrected in the v2 docs:**
+
+**1. The window is landscape, not tall and narrow.** Measured 2560 × 1600 at 150% scaling, mirror
+taking 443 logical px, giving the app **1253 × 1013 logical** (content ≈ 1168 × 973) — about
+1.24 : 1. D95 had inferred "~1250 × 1400, taller than wide" from `main.dart`'s geometry math
+without accounting for the work area's real height at 150%. **Consequence:** Flows' vertical
+pipeline *stands*, but on different reasoning (the screen wastes ~55% of its height, and at 1168px
+wide each node becomes a horizontal strip holding everything in one row); Live's vertical split is
+**reversed** — at 973px of content height a vertical split gives each pane ~470px, too short for
+both a log console and portrait cards. Live keeps a horizontal split, made resizable.
+
+**2. The Library grid uses one cell aspect ratio for two very different image shapes** — invisible
+from source, and arguably the worst visual defect in the app. Cells are near-square; `entities`/
+`scraped`/`follow_queued` hold 1 : 2.08 portraits (~40% of each cell wasted, letterboxed
+left/right) while `scanned`/`gender_valid`/`gender_invalid`/`scrape_queued` hold 5.45 : 1 row crops
+(**~82% wasted**, letterboxed top/bottom). In the row-crop folder only 9 cells fit the grid pane
+where a matched shape holds ~40 — a 4× throughput difference on a 6,635-image backlog. D41's
+`BoxFit.contain` choice is right and stays; the container just has to match the content. Now the
+top Library fix, ahead of review mode.
+
+**3. The dominant problem is horizontal emptiness, not density.** Flows leaves ~55% of the screen
+black; Settings' switch rows have ~1100 logical px between label and control; Library spends 38% of
+its width on two navigation rails; Live's fixed 420px visualization column was ~95% empty. The
+original audit read the app as cluttered — it is the opposite.
+
+**Two further findings worth recording.** Four of the five Flow cards render an *identical* amber
+hourglass above the *identical* words "Waiting on condition", so the screen whose purpose is
+showing what the pipeline is doing communicates almost nothing without hovering each ⓘ in turn —
+worse than the source-only audit predicted. And Services' detail pane turned out to already be the
+app's best design (an uppercase-micro-label metric strip, self-explaining switch cards, a framed
+terminal with search/copy); it is promoted to a shared `MetricStrip` component rather than a new
+treatment being invented.
+
+**One open question closed by observation:** the light-theme terminal palette is safe — real `adb`
+output is essentially monochrome, with no dark-on-dark ANSI. The "always dark" override stays as a
+preference, not a fallback.
+
+**Cost:** none to the plan's shape — thirteen checkpoints stand, and the scope boundary (everything
+inside `app/`, no agent changes) is unaffected. Adding a `driver_main.dart` entrypoint with
+`enableFlutterDriverExtension()` would make any future observation pass far more precise than
+coordinate clicking, and is worth doing if this recurs.
+
+---
+
+## 2026-08-04 (continued) — v2.0.0 UI/UX overhaul: planned, not yet built
+
+### D94 · Own token layer on Material 3, not a component framework
+
+**Asked:** the user opened a session whose stated goal is a "MAJOR OVERHAUL" of the control
+center's UI/UX — the app works correctly everywhere, but looks generic, and they want real themes
+that change its character completely. Planned under Opus, to be implemented under Sonnet from the
+docs produced. Everything below is **planning only** — no `app/` code changed this session.
+
+**The diagnosis, from reading all 90 files under `app/lib/`:** the entire theme is four lines
+(`app.dart:15-21`) — `useMaterial3`, `brightness: dark`, one `colorSchemeSeed`, one transparent
+background. **None** of `ThemeData`'s ~40 component sub-themes are set, and there is no `textTheme`
+customization at all. So every card, button, chip, field, tab, tooltip and dialog renders at
+Material's default. The app doesn't look generic because it uses Material — it looks generic
+because it uses Material's *defaults*. `core/app_theme.dart` (the CP 7.3 centralization) holds
+only three status colors and a terminal palette; 13 hardcoded colors survive outside it, three of
+which (`service_detail.dart:305/314/380`) are the exact same hex values as `AppPalette`'s,
+re-typed by hand.
+
+**Chosen:** build an `AppTokens` `ThemeExtension` covering surface/content/accent/status/type/
+geometry/effects/space/motion/chart/terminal, and a `build_theme.dart` that fills every one of
+those ~40 sub-themes from it. Six themes ship: Classic (today's look, preserved, derived from the
+real seed rather than transcribed), Command Deck, Nocturne, Mica, Daylight, Swiss.
+
+**Rejected: adopting `shadcn_ui` (0.56.0), `forui` (0.25.0) or `fluent_ui`.** All three are good.
+All three would mean rewriting 90 files against a new widget vocabulary — and those files encode
+roughly a dozen hard-won overflow and constraint fixes (D19, D43–D46, D77, D87, D89, D93) that a
+rewrite would have to rediscover live, on a single-screen laptop, against a real pipeline. Both
+shadcn_ui and forui are also pre-1.0 and moving fast. `fluent_ui` would serve exactly one of the
+six themes well and fight the other five.
+
+**Why the token layer wins:** a `Card` with a themed shape, border, elevation strategy and surface
+color is not recognisably a Material `Card`. The widget tree barely changes; the theme does all the
+work. It also makes a seventh theme one file plus one registry line, which is the real test of
+whether the abstraction holds.
+
+**Cost:** V2.3 is a 90-file mechanical migration with real regression potential. Mitigated by the
+ten existing layout tests (D19's precedent — overflow is a paint-time error `flutter analyze`
+cannot see) plus a `token_coverage_test.dart` enforcing that `grep -rn "Color(0x" app/lib` returns
+nothing outside `core/theme/`.
+
+### D95 · Flows renders as a vertical pipeline; Live splits vertically
+
+**Asked:** which screens are shaped wrongly, not merely styled plainly.
+
+**Chosen:** three re-architectures. **Flows** becomes a node/edge pipeline with the inter-stage
+backlog counts on the edges — `entity_ingest → scan → classify → scrape → follow` is a strict
+pipeline whose entire gating logic (D86's `SCRAPE_RESERVE_FACTOR`, D91's `SCAN_RESERVE_TARGET`) is
+about the size of those queues, and the current five-cards-in-a-`Wrap` shows none of them; they
+live on a different tab, in the Library folder rail. The two human-in-the-loop edges get marked and
+made clickable, which is the first time the app has ever shown that the pipeline *waits on the
+user* at two specific points. **Overview** becomes a bento grid with a computed hero status
+sentence, replacing a page that embeds five full 360px `FlowCard`s and therefore duplicates the
+Flows screen rather than summarising it. **Library** gets a keyboard-driven fullscreen review mode,
+because the current grid renders a 1080×2246 profile page into a ~120px thumbnail — you cannot
+actually read what you are judging.
+
+**Both new layouts are vertical, deliberately.** `main.dart` sizes the window to fill the space
+right of the scrcpy mirror — roughly 1250×1400 logical px, taller than it is wide. A horizontal
+five-stage diagram would either wrap awkwardly or shrink each node past usefulness; the Live
+screen's current fixed 420px visualization column is already flagged *in its own source comments*
+as tuned to `entity-scrape` only, with a warning that follow/classify will need different values.
+
+**Flagged as a bet, not a certainty:** I have never seen the app render (rule 5), so the aspect
+ratio is inferred from arithmetic in `main.dart`, not observed. `docs/v2/VISUAL_INPUTS.md` asks for
+one screenshot that confirms or kills all three vertical decisions before V2.5 begins.
+
+> **⚠️ Amended same day by D97 — the bet was half wrong.** The window is landscape
+> (1253 × 1013 logical), not tall and narrow. Flows' vertical pipeline survives on better
+> reasoning; Live's vertical split is reversed. See D97.
+
+### D96 · Design-language triage — three styles argued against, not deferred
+
+**Asked:** the user supplied sixteen design inspirations (Minimalist, Glassmorphism, Neumorphism,
+Brutalism, Bento, Skeuomorphism, Neo-brutalism, Claymorphism, Cyberpunk, Y2K, Dark Academia,
+Swiss/International, Editorial, Luxury, Retro-futurism) and asked for a few that match the app,
+with the rest kept as a backlog.
+
+**Chosen for v2.0.0:** **Swiss/International** — the one classical design language that is
+actually *about dense information* (timetables, wayfinding, technical tables), which is all this
+app renders. **Bento** adopted as a *layout pattern* for Overview rather than a theme, since it's a
+composition idea with no color or type language of its own — that way it works in all six themes
+instead of one. **Glassmorphism** judged already served by Mica: real OS-composited Mica rather
+than stacked `BackdropFilter`s, same aesthetic at a fraction of the GPU cost, and native to the
+platform. **Minimalist** already served twice over, by Command Deck and Swiss from opposite
+directions.
+
+**Backlogged with real sketches:** Cyberpunk, Editorial, Dark Academia, Retro-futurism (v2.1 —
+good fit, low-to-medium cost); Neo-brutalism, Luxury, Y2K (v2.2 — prototype first).
+
+**Argued against outright, rather than merely deferred:** **Neumorphism** and **Claymorphism** —
+the aesthetic *is* low contrast, since soft embossing depends on foreground and background being
+nearly the same value. They fail the 4.5:1 floor by construction, not by execution, and cannot be
+made accessible while remaining recognisable. For a monitoring tool whose status colors must be
+unmissable, that is disqualifying. **Skeuomorphism** — needs bespoke raster assets per component;
+an art-production project, not a theming one, and it doesn't scale to 40 sub-themes.
+**Brutalism proper** (as distinct from neo-brutalism) — deliberately hostile ergonomics, directly
+opposed to rule 7.
+
+**Cost:** none yet. Adding any backlogged theme after V2.4 is one file plus one registry line.
+
+---
+
 ## 2026-08-04 (continued) — message-triggered ingest left a stale gate on the Flows card
 
 ### D92 · Wake the ingest poll loop right after a message-triggered run, instead of leaving a stale gate

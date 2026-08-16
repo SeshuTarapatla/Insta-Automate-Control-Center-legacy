@@ -2,25 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_snack_bar.dart';
+import '../../core/service_actions.dart';
 import '../../core/service_models.dart';
+import '../../core/theme/tokens.dart';
+import '../../ui/buttons.dart';
+import '../../ui/icons.dart';
+import '../../ui/layout.dart';
+import '../../ui/status.dart';
+import '../../ui/surfaces.dart';
+import '../../ui/text.dart';
+import 'service_status_kind.dart';
 import 'service_terminal.dart';
 import 'services_controller.dart';
-import 'status_dot.dart';
-
-/// The terminal never shrinks below this, however cramped the window: a pane
-/// squeezed to a couple of rows is worse than one you have to scroll to.
-const _minTerminalHeight = 220.0;
-
-/// What actually stops working while a service is down. A confirmation without
-/// a consequence is not a confirmation — same rule as the flow switches.
-const _stopConsequence = {
-  'adb': 'Every phone interaction goes through the ADB server: scan, scrape and follow runs will '
-      'fail until it is back, and the pods lose the device too.',
-  'vl-server': 'Gender and privacy classification stops. entity_classify will fail on every image '
-      'it tries while the model is down.',
-  'wsl-bridge': 'The device mirror stops. The pipeline itself keeps running — this only affects '
-      'scrcpy.',
-};
 
 class ServiceDetail extends ConsumerStatefulWidget {
   const ServiceDetail({super.key, required this.status});
@@ -55,76 +48,23 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
     }
   }
 
-  Future<bool> _confirm(String title, String body, String action) async {
-    final answer = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(title),
-        content: Text(body),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: Text(action)),
-        ],
-      ),
-    );
-    return answer == true;
-  }
-
   ServicesController get _services => ref.read(servicesControllerProvider.notifier);
 
-  Future<void> _start() =>
-      _run('start', () => _services.start(widget.status.name), '${widget.status.label} started');
-
-  Future<void> _stop() async {
-    final status = widget.status;
-    final consequence =
-        _stopConsequence[status.name] ?? 'Anything that depends on it will fail until it is back.';
-    if (!await _confirm('Stop ${status.label}?', consequence, 'Stop')) return;
-    await _run('stop', () => _services.stop(status.name), '${status.label} stopped');
+  /// `core/service_actions.dart` owns the confirm dialog and the try/catch
+  /// (shared with the command palette, V2.12); this only adds the per-button
+  /// busy-spinner state, which is purely local UI and has no palette
+  /// equivalent to share.
+  Future<void> _wrap(String action, Future<void> Function() body) async {
+    setState(() => _busy = action);
+    await body();
+    if (mounted) setState(() => _busy = null);
   }
 
-  Future<void> _restart() =>
-      _run('restart', () => _services.restart(widget.status.name), '${widget.status.label} restarted');
-
-  Future<void> _takeover() async {
-    final status = widget.status;
-    if (!await _confirm(
-      'Take over ${status.label}?',
-      'The agent will kill ${status.external?.display ?? 'the external process'} '
-          '(pid ${status.external?.pid}) and start its own supervised copy on port ${status.port}. '
-          'Anything mid-flight through it will be interrupted.',
-      'Take over',
-    )) {
-      return;
-    }
-    await _run('takeover', () => _services.takeover(status.name), '${status.label} taken over');
-  }
-
-  Future<void> _test() async {
-    setState(() => _busy = 'test');
-    try {
-      final outcome = await _services.runTest(widget.status.name);
-      if (mounted) {
-        // A failing test is an answer, not an error — it is reported as plainly
-        // as a passing one, and its metrics stay on screen either way.
-        AppSnackBar.show(
-          context,
-          '${widget.status.label}: ${outcome.summary}',
-          isError: !outcome.ok,
-        );
-      }
-    } catch (error) {
-      if (mounted) {
-        AppSnackBar.show(
-          context,
-          '${widget.status.label}: ${describeAgentError(error)}',
-          isError: true,
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _busy = null);
-    }
-  }
+  Future<void> _start() => _wrap('start', () => startService(context, ref, widget.status));
+  Future<void> _stop() => _wrap('stop', () => stopService(context, ref, widget.status));
+  Future<void> _restart() => _wrap('restart', () => restartService(context, ref, widget.status));
+  Future<void> _takeover() => _wrap('takeover', () => takeoverService(context, ref, widget.status));
+  Future<void> _test() => _wrap('test', () => testService(context, ref, widget.status));
 
   Future<void> _setSelfHeal(bool value) => _run(
     'self_heal',
@@ -146,50 +86,42 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
 
     final status = widget.status;
     final theme = Theme.of(context);
+    final tokens = theme.tokens;
 
     // At the 1024 px minimum window this pane is ~550 wide, where the stat
     // chips wrap onto four rows and every card's text wraps with them — the
     // panels above the terminal can genuinely want more height than the window
-    // has. Capping them at "everything except the terminal's floor" means they
-    // scroll among themselves instead of pushing the terminal off the bottom,
-    // and because the cap is a maximum rather than a share, a tall window still
-    // gives the terminal every pixel the panels do not use.
-    return LayoutBuilder(
-      builder: (context, constraints) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: (constraints.maxHeight - _minTerminalHeight - 16).clamp(
-                0.0,
-                double.infinity,
-              ),
-            ),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _header(theme, status),
-                  const SizedBox(height: 16),
-                  _stats(theme, status),
-                  const SizedBox(height: 12),
-                  _switches(theme, status),
-                  if (status.hasTest) ...[const SizedBox(height: 12), _testPanel(theme, status)],
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Expanded(child: ServiceTerminal(key: ValueKey(status.name), status: status)),
-        ],
+    // has. A vertical `ResizableSplit` replaces the old fixed "everything
+    // except the terminal's floor" calculation: the panels scroll among
+    // themselves within whatever share of the height the user has dragged for
+    // them, and the terminal keeps the rest.
+    return ResizableSplit(
+      axis: Axis.vertical,
+      persistKey: 'services.detail.split',
+      initialFirstSize: 360,
+      minFirst: 260,
+      minSecond: 220,
+      first: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _header(theme, status),
+            SizedBox(height: tokens.space.lg),
+            _stats(theme, status),
+            SizedBox(height: tokens.space.md),
+            _switches(theme, status),
+            if (status.hasTest) ...[SizedBox(height: tokens.space.md), _testPanel(theme, status)],
+          ],
+        ),
       ),
+      second: ServiceTerminal(key: ValueKey(status.name), status: status),
     );
   }
 
   // ---------------------------------------------------------------- header
 
   Widget _header(ThemeData theme, ServiceStatus status) {
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -200,8 +132,8 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
             children: [
               Row(
                 children: [
-                  StatusDot(state: status.state, size: 12),
-                  const SizedBox(width: 10),
+                  StatusDot(kind: status.state.statusKind, pulsing: status.state.isTransient, size: 12),
+                  SizedBox(width: tokens.space.sm),
                   // Flexible, not fixed: at the 1024 px minimum window the
                   // action buttons leave this row little to work with, and the
                   // name is the part that can afford to ellipsize.
@@ -213,7 +145,7 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  const SizedBox(width: 10),
+                  SizedBox(width: tokens.space.sm),
                   Text(
                     status.state.label.toUpperCase(),
                     style: theme.textTheme.labelSmall?.copyWith(
@@ -223,15 +155,15 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
                   ),
                 ],
               ),
-              const SizedBox(height: 6),
+              SizedBox(height: tokens.space.xs),
               Text(
                 status.description,
-                style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+                style: theme.textTheme.bodyMedium?.copyWith(color: tokens.content.secondary),
               ),
             ],
           ),
         ),
-        const SizedBox(width: 16),
+        SizedBox(width: tokens.space.lg),
         // A Row lays its non-flexible children out first, against the full
         // width — without a cap the button Wrap could take the lot and leave
         // the name nothing to render into.
@@ -243,57 +175,58 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
   Widget _actions(ServiceStatus status) {
     final busy = _busy != null;
 
-    return Wrap(
-      spacing: 8,
+    return ButtonGroup(
       children: [
         if (status.canTakeover)
-          FilledButton.icon(
+          AppButton(
+            label: 'Take over',
+            tone: ButtonTone.primary,
+            filled: true,
+            busy: _busy == 'takeover',
             onPressed: busy ? null : _takeover,
-            icon: _icon('takeover', Icons.swap_horiz),
-            label: const Text('Take over'),
           )
         else if (status.isRunning)
-          OutlinedButton.icon(
+          AppButton(
+            label: 'Restart',
+            busy: _busy == 'restart',
             onPressed: busy ? null : _restart,
-            icon: _icon('restart', Icons.refresh),
-            label: const Text('Restart'),
           )
         else
-          FilledButton.icon(
+          AppButton(
+            label: 'Start',
+            tone: ButtonTone.primary,
+            filled: true,
+            busy: _busy == 'start',
             onPressed: busy ? null : _start,
-            icon: _icon('start', Icons.play_arrow),
-            label: const Text('Start'),
           ),
         if (status.canStop)
-          OutlinedButton.icon(
+          AppButton(
+            label: 'Stop',
+            tone: ButtonTone.danger,
+            busy: _busy == 'stop',
             onPressed: busy ? null : _stop,
-            icon: _icon('stop', Icons.stop),
-            label: const Text('Stop'),
           ),
         if (status.hasTest)
-          OutlinedButton.icon(
+          AppButton(
+            label: 'Test',
+            busy: _busy == 'test',
             // The test needs something to talk to; an external process still
             // answers on the port, so it is testable without being ours.
             onPressed: busy || !status.isRunning ? null : _test,
-            icon: _icon('test', Icons.biotech_outlined),
-            label: const Text('Test'),
           ),
       ],
     );
   }
 
-  Widget _icon(String action, IconData icon) => _busy == action
-      ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2))
-      : Icon(icon, size: 18);
-
   // ----------------------------------------------------------------- stats
 
   Widget _stats(ThemeData theme, ServiceStatus status) {
     final probe = status.probe;
+    final tokens = theme.tokens;
 
     return Wrap(
-      spacing: 10,
-      runSpacing: 10,
+      spacing: tokens.space.sm,
+      runSpacing: tokens.space.sm,
       children: [
         _Stat(
           label: 'Uptime',
@@ -302,7 +235,7 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
         _Stat(
           label: 'Restarts',
           value: '${status.restartCount}',
-          tone: status.restartCount > 0 ? const Color(0xFFFFB454) : null,
+          tone: status.restartCount > 0 ? tokens.status.warn.fg : null,
         ),
         _Stat(label: 'PID', value: status.pid?.toString() ?? '—'),
         _Stat(label: 'Port', value: '${status.port}'),
@@ -311,7 +244,7 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
           value: probe == null ? '—' : '${probe.latencyMs.round()} ms',
           tone: probe == null
               ? null
-              : (probe.ok ? const Color(0xFF3DD68C) : theme.colorScheme.error),
+              : (probe.ok ? tokens.status.good.fg : theme.colorScheme.error),
           detail: probe?.detail,
         ),
         if (status.exitCode != null)
@@ -355,7 +288,7 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
             onChanged: _busy != null ? null : _setSelfHeal,
           ),
         ),
-        const SizedBox(width: 12),
+        SizedBox(width: theme.tokens.space.md),
         Expanded(
           child: _SwitchCard(
             title: 'Start at logon',
@@ -373,53 +306,46 @@ class _ServiceDetailState extends ConsumerState<ServiceDetail> {
   // ------------------------------------------------------------------ test
 
   Widget _testPanel(ThemeData theme, ServiceStatus status) {
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
     final test = status.lastTest;
     final tone = test == null
-        ? scheme.onSurfaceVariant
-        : (test.ok ? const Color(0xFF3DD68C) : scheme.error);
+        ? tokens.content.secondary
+        : (test.ok ? tokens.status.good.fg : theme.colorScheme.error);
 
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                test == null
-                    ? Icons.science_outlined
-                    : (test.ok ? Icons.check_circle_outline : Icons.error_outline),
-                size: 16,
-                color: tone,
-              ),
-              const SizedBox(width: 8),
-              Text('Functional test', style: theme.textTheme.labelLarge),
-              const Spacer(),
-              if (test != null)
-                Text(
-                  '${test.durationMs.round()} ms',
-                  style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+    return AppPanel(
+      level: SurfaceLevel.raised,
+      child: SizedBox(
+        width: double.infinity,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                AppIcon(
+                  test == null
+                      ? AppIcons.science
+                      : (test.ok ? AppIcons.success : AppIcons.error),
+                  size: IconSize.sm,
+                  color: tone,
                 ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            test?.summary ??
-                'Not run yet. Unlike the probe, this does real work — a shell command, an '
-                    'inference, a scrcpy round trip — and reports what it measured.',
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: test == null ? scheme.onSurfaceVariant : null,
+                SizedBox(width: tokens.space.xs),
+                Text('Functional test', style: theme.textTheme.labelLarge),
+                const Spacer(),
+                if (test != null) NumericText('${test.durationMs.round()} ms', role: TextRole.caption, color: tokens.content.secondary),
+              ],
             ),
-          ),
-          if (test != null && test.metrics.isNotEmpty) ..._metrics(theme, test),
-        ],
+            SizedBox(height: tokens.space.xs),
+            Text(
+              test?.summary ??
+                  'Not run yet. Unlike the probe, this does real work — a shell command, an '
+                      'inference, a scrcpy round trip — and reports what it measured.',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: test == null ? tokens.content.secondary : null,
+              ),
+            ),
+            if (test != null && test.metrics.isNotEmpty) ..._metrics(theme, test),
+          ],
+        ),
       ),
     );
   }
@@ -438,13 +364,13 @@ List<Widget> _metrics(ThemeData theme, TestOutcome test) {
 
   return [
     if (short.isNotEmpty) ...[
-      const SizedBox(height: 10),
+      const Gap.sm(),
       // Wrap hands its children unbounded width, so even a chip that is meant
       // to be short is told the line width it has to fit inside.
       LayoutBuilder(
         builder: (context, constraints) => Wrap(
-          spacing: 8,
-          runSpacing: 8,
+          spacing: theme.tokens.space.sm,
+          runSpacing: theme.tokens.space.sm,
           children: [
             for (final entry in short)
               _MetricChip(
@@ -457,7 +383,7 @@ List<Widget> _metrics(ThemeData theme, TestOutcome test) {
       ),
     ],
     for (final entry in long) ...[
-      const SizedBox(height: 8),
+      const Gap.sm(),
       _MetricLine(label: entry.key.replaceAll('_', ' '), value: '${entry.value}'),
     ],
   ];
@@ -472,32 +398,19 @@ class _MetricLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
 
     return Tooltip(
       message: value,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerLowest,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: scheme.outlineVariant),
-        ),
+      child: AppPanel(
+        level: SurfaceLevel.raised,
+        padding: EdgeInsets.symmetric(horizontal: tokens.space.sm, vertical: tokens.space.xs),
+        borderRadius: tokens.geometry.radiusSm,
         child: Row(
           children: [
-            Text(
-              label,
-              style: theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                value,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelMedium?.copyWith(fontFamily: 'Consolas'),
-              ),
-            ),
+            Text(label, style: theme.textTheme.labelSmall?.copyWith(color: tokens.content.secondary)),
+            SizedBox(width: tokens.space.xs),
+            Expanded(child: MonoText(value, role: TextRole.label)),
           ],
         ),
       ),
@@ -516,34 +429,21 @@ class _Stat extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
 
-    final box = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: scheme.outlineVariant),
-      ),
+    final box = AppPanel(
+      level: SurfaceLevel.raised,
+      padding: EdgeInsets.symmetric(horizontal: tokens.space.md, vertical: tokens.space.sm),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
             label.toUpperCase(),
-            style: theme.textTheme.labelSmall?.copyWith(
-              color: scheme.onSurfaceVariant,
-              letterSpacing: 0.8,
-            ),
+            style: theme.textTheme.labelSmall?.copyWith(color: tokens.content.secondary, letterSpacing: 0.8),
           ),
-          const SizedBox(height: 2),
-          Text(
-            value,
-            style: theme.textTheme.titleSmall?.copyWith(
-              color: tone,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
+          SizedBox(height: tokens.space.xs / 2),
+          NumericText(value, role: TextRole.cardTitle, color: tone),
         ],
       ),
     );
@@ -570,15 +470,11 @@ class _SwitchCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: scheme.outlineVariant),
-      ),
+    return AppPanel(
+      level: SurfaceLevel.raised,
+      padding: EdgeInsets.fromLTRB(tokens.space.md, tokens.space.sm, tokens.space.sm, tokens.space.sm),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -587,18 +483,15 @@ class _SwitchCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(title, style: theme.textTheme.labelLarge),
-                const SizedBox(height: 3),
-                Text(
-                  subtitle,
-                  style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-                ),
+                SizedBox(height: tokens.space.xs / 1.3),
+                Text(subtitle, style: theme.textTheme.bodySmall?.copyWith(color: tokens.content.secondary)),
               ],
             ),
           ),
           busy
-              ? const Padding(
-                  padding: EdgeInsets.all(12),
-                  child: SizedBox.square(
+              ? Padding(
+                  padding: EdgeInsets.all(tokens.space.md),
+                  child: const SizedBox.square(
                     dimension: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   ),
@@ -623,36 +516,20 @@ class _MetricChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
 
     final chip = ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: scheme.surfaceContainerLowest,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: scheme.outlineVariant),
-        ),
+      child: AppPanel(
+        level: SurfaceLevel.raised,
+        padding: EdgeInsets.symmetric(horizontal: tokens.space.sm, vertical: tokens.space.xs),
+        borderRadius: tokens.geometry.radiusSm,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              label,
-              style: theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant),
-            ),
-            const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                value,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelMedium?.copyWith(
-                  fontFamily: 'Consolas',
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-            ),
+            Text(label, style: theme.textTheme.labelSmall?.copyWith(color: tokens.content.secondary)),
+            SizedBox(width: tokens.space.xs),
+            Flexible(child: NumericText(value, role: TextRole.label)),
           ],
         ),
       ),

@@ -1,10 +1,13 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:phosphor_flutter/phosphor_flutter.dart';
 
 import '../../core/agent_client.dart';
 import '../../core/app_snack_bar.dart';
 import '../../core/device_models.dart';
+import '../../core/theme/tokens.dart';
+import '../../ui/icons.dart';
 
 /// `GET /api/device` is the only state source (CP 4.5) — no WS channel for
 /// this yet, so a light periodic poll keeps it current while the Live screen
@@ -36,9 +39,35 @@ class DeviceController extends AsyncNotifier<DeviceStatus> {
     await dio.post('/api/device/scrcpy/${mirroring ? 'stop' : 'start'}');
     await refresh();
   }
+
+  /// Every serial adb currently knows about (PLAN V2.13.1) — for Settings'
+  /// device-pin dropdown, not this bar; a plain fetch rather than watched
+  /// state, since nothing here needs to react to it live.
+  Future<List<AdbDeviceInfo>> fetchAdbDevices() async {
+    final dio = ref.read(agentClientProvider);
+    final response = await dio.get('/api/device/adb-devices');
+    final devices = (response.data as Map<String, dynamic>)['devices'] as List<dynamic>;
+    return [for (final d in devices) AdbDeviceInfo.fromJson(d as Map<String, dynamic>)];
+  }
+
+  /// `null` clears the pin, reverting to the pipeline's own `ANDROID_SERIAL`.
+  Future<void> setPinnedSerial(String? serial) async {
+    final dio = ref.read(agentClientProvider);
+    await dio.patch('/api/device/pinned-serial', data: {'serial': serial});
+    await refresh();
+  }
 }
 
 final deviceControllerProvider = AsyncNotifierProvider<DeviceController, DeviceStatus>(DeviceController.new);
+
+/// A plain, unwatched-by-default fetch (Settings' device-pin dropdown reads
+/// it once per open, same as the pairing card's own one-shot reads) rather
+/// than folded into `deviceControllerProvider`'s own polled state, since the
+/// two have unrelated refresh cadences and a failed adb lookup shouldn't
+/// blank out an otherwise-healthy device status.
+final adbDevicesProvider = FutureProvider.autoDispose<List<AdbDeviceInfo>>(
+  (ref) => ref.read(deviceControllerProvider.notifier).fetchAdbDevices(),
+);
 
 /// Device control, compacted into the Live screen's header row (D46) rather
 /// than a full card in `RunSummary`'s body — CP 4.5's original design showed
@@ -60,7 +89,7 @@ class DeviceBar extends ConsumerWidget {
     });
 
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
+    final tokens = theme.tokens;
     final async = ref.watch(deviceControllerProvider);
 
     return async.when(
@@ -69,33 +98,41 @@ class DeviceBar extends ConsumerWidget {
         height: 18,
         child: CircularProgressIndicator(strokeWidth: 2),
       ),
-      error: (error, _) => _Status(theme: theme, icon: Icons.error_outline, message: 'device error'),
+      error: (error, _) => _Status(theme: theme, glyph: AppIcons.error, message: 'device error'),
       data: (status) {
         if (!status.bridgeReachable) {
-          return _Status(theme: theme, icon: Icons.link_off, message: 'bridge down');
+          return _Status(theme: theme, glyph: AppIcons.linkOff, message: 'bridge down');
         }
         if (status.serial == null) {
-          return _Status(theme: theme, icon: Icons.phone_android_outlined, message: 'no device');
+          return _Status(theme: theme, glyph: AppIcons.device, message: 'no device');
         }
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.phone_android_outlined, size: 18, color: scheme.onSurfaceVariant),
-            const SizedBox(width: 6),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 140),
-              child: Text(
-                status.model ?? status.serial!,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodyMedium,
+            AppIcon(AppIcons.device, size: IconSize.sm, color: tokens.content.secondary),
+            SizedBox(width: tokens.space.xs),
+            // `Flexible` around the existing 140px cap, not the cap alone —
+            // the Live header always has ≥140px of slack so this is a no-op
+            // there (D46's tuning is untouched), but Overview's Device tile
+            // (V2.7) can be narrower than 140+icon+gap+button, and a hard
+            // `ConstrainedBox` alone doesn't shrink below its own max when
+            // the *row* itself is what's actually too narrow.
+            Flexible(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 140),
+                child: Text(
+                  status.model ?? status.serial!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyMedium,
+                ),
               ),
             ),
-            const SizedBox(width: 10),
+            SizedBox(width: tokens.space.sm),
             SizedBox(
               height: 32,
               child: OutlinedButton(
-                style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 12)),
+                style: OutlinedButton.styleFrom(padding: EdgeInsets.symmetric(horizontal: tokens.space.sm)),
                 onPressed: () async {
                   try {
                     await ref.read(deviceControllerProvider.notifier).toggleMirror();
@@ -105,7 +142,10 @@ class DeviceBar extends ConsumerWidget {
                     }
                   }
                 },
-                child: Text(status.mirroring ? 'Stop' : 'Start'),
+                // Scoped in the label (SCREENS §3) — the Live header can
+                // have two bare "Stop" buttons inches apart (the flow's own
+                // and the mirror's); ambiguous at a glance without this.
+                child: Text(status.mirroring ? 'Stop mirror' : 'Start mirror'),
               ),
             ),
           ],
@@ -116,20 +156,21 @@ class DeviceBar extends ConsumerWidget {
 }
 
 class _Status extends StatelessWidget {
-  const _Status({required this.theme, required this.icon, required this.message});
+  const _Status({required this.theme, required this.glyph, required this.message});
 
   final ThemeData theme;
-  final IconData icon;
+  final PhosphorIconData Function(PhosphorIconsStyle) glyph;
   final String message;
 
   @override
   Widget build(BuildContext context) {
+    final tokens = theme.tokens;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(icon, size: 18, color: theme.colorScheme.onSurfaceVariant),
-        const SizedBox(width: 6),
-        Text(message, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        AppIcon(glyph, size: IconSize.sm, color: tokens.content.secondary),
+        SizedBox(width: tokens.space.xs),
+        Text(message, style: theme.textTheme.bodySmall?.copyWith(color: tokens.content.secondary)),
       ],
     );
   }

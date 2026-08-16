@@ -590,23 +590,38 @@ class ManagedService:
         within_grace = self._started_at is not None and now - self._started_at < self.spec.start_grace
         self.state = ServiceState.STARTING if within_grace else ServiceState.UNHEALTHY
         if within_grace:
+            self._unhealthy_since = None
             return
 
-        # Wedged rather than crashed: still holding the port, answering nothing.
-        # A crash-only policy never notices this, which is why self-heal covers it.
-        if self._unhealthy_since is None:
-            self._unhealthy_since = now
-        elif (
-            self.self_heal
-            and self.spec.unhealthy_grace > 0
-            and now - self._unhealthy_since >= self.spec.unhealthy_grace
-        ):
-            self.ring.note(
-                f"self-heal: probe failing for {self.spec.unhealthy_grace:.0f}s "
-                "while the process is still alive — restarting"
-            )
+        # Wedged rather than crashed: still holding the port, answering nothing —
+        # a crash-only policy never notices this, which is why self-heal covers
+        # it. `_unhealthy_since` tracks how long the *transport itself* has been
+        # failing continuously, not the compound probe: adb's own `probe_extra`
+        # (device attached) can stay false forever with no phone plugged in,
+        # against a transport that's genuinely fine — found live 2026-08-09,
+        # restarting a perfectly healthy adb every `unhealthy_grace` for as long
+        # as the phone stays disconnected, which is exactly the pointless,
+        # indefinite churn self-heal exists to avoid, not cause. Resetting the
+        # instant the transport recovers (mirroring `_healthy_since` above) also
+        # means a single transient probe hiccup can never masquerade as a full
+        # `unhealthy_grace` of real wedging — found by this fix's own test
+        # flaking under load, not live.
+        if not self.probe.transport_ok:
+            if self._unhealthy_since is None:
+                self._unhealthy_since = now
+            elif (
+                self.self_heal
+                and self.spec.unhealthy_grace > 0
+                and now - self._unhealthy_since >= self.spec.unhealthy_grace
+            ):
+                self.ring.note(
+                    f"self-heal: probe failing for {self.spec.unhealthy_grace:.0f}s "
+                    "while the process is still alive — restarting"
+                )
+                self._unhealthy_since = None
+                self.restart()
+        else:
             self._unhealthy_since = None
-            self.restart()
 
     async def _probe_idle(self, now: float) -> None:
         self.probe = await run_probe(self.spec.probe, self.spec.probe_extra)
@@ -623,6 +638,27 @@ class ManagedService:
             self.state = ServiceState.STOPPED
 
         if self._desired and self.self_heal and now >= self._retry_at:
+            # `self.probe.ok` above is compound — for adb it also needs
+            # `adb_device_present`, which stays false for as long as no phone is
+            # attached even against a perfectly live server. That leaves the raw
+            # port check as the only reliable signal here: without it, self-heal
+            # blindly spawns on top of whatever already holds the port (someone
+            # else's `adb start-server`, e.g. any plain `adb` invocation
+            # auto-starting its own daemon while ours happened to be down —
+            # confirmed live 2026-08-09), which crashes on a bind conflict every
+            # time and burns the whole backoff budget forever, never recovering.
+            # Reusing `_port_owner`, the same lookup `detect_external()` itself
+            # uses, catches that before wasting a spawn attempt on it.
+            owner = _port_owner(self.spec.probe.port)
+            if owner is not None:
+                self.detect_external()
+                self.ring.note(
+                    f"self-heal: port {self.spec.probe.port} is already held by "
+                    f"pid {owner.pid}, not us — taking it over instead of colliding with it"
+                )
+                self.restart_count += 1
+                self.takeover()
+                return
             self.restart_count += 1
             self._spawn()
 
@@ -734,11 +770,30 @@ class Supervisor:
             service.adopt()
             if service.origin == ServiceOrigin.NONE:
                 # An unadopted service may still be up from before the agent ever
-                # ran (the wt.exe shortcut, a manual launch) — find that out before
-                # autostart decides to spawn a second copy onto a busy port.
+                # ran (the wt.exe shortcut, a manual launch, or — found live
+                # 2026-08-09 — some unrelated tool's own `adb start-server`
+                # auto-starting into a gap while ours was down) — find that out
+                # before autostart decides to spawn a second copy onto a busy
+                # port. `detect_external()` is called directly, not gated behind
+                # the compound probe below: a probe_extra like adb's
+                # device-attached check can keep that compound result false
+                # forever with no phone attached, even against a perfectly live
+                # external server — which used to hide it from this check
+                # entirely and let autostart collide with it on every agent
+                # restart (the same root cause `_probe_idle`'s self-heal path
+                # had, fixed alongside this).
+                service.detect_external()
                 service.probe = await run_probe(service.spec.probe, service.spec.probe_extra)
-                if service.probe.ok:
-                    service.detect_external()
+                if service.origin == ServiceOrigin.EXTERNAL and service.autostart and service.self_heal:
+                    logger.info(
+                        f"{service.spec.name}: reclaiming port {service.spec.probe.port} "
+                        "from an external process at startup"
+                    )
+                    service.ring.note(
+                        f"reclaiming port {service.spec.probe.port} from an external "
+                        "process found already listening at startup"
+                    )
+                    service.takeover()
 
             if service.autostart and service.origin == ServiceOrigin.NONE:
                 try:

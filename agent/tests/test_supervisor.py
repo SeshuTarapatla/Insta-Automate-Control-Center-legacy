@@ -328,6 +328,110 @@ async def main():
     await assert_survives_kill("t-killme1", 19810, ["/F"], "/F kill")
     await assert_survives_kill("t-killme2", 19811, ["/F", "/T"], "/F /T tree-kill")
 
+    print("\n15. self-heal reclaims a port an outsider grabs during backoff, instead of "
+          "colliding with it forever")
+    # Reproduces the real bug found live 2026-08-09: adb's probe_extra
+    # (device-attached check) can never pass while no phone is connected, even
+    # against a perfectly live server, so the old `_probe_idle` never reached
+    # `detect_external()` and just kept blindly spawning on top of whatever had
+    # grabbed the port in the meantime (there, another `adb start-server`
+    # auto-started by an unrelated tool) — crashing on a bind conflict every
+    # single retry, forever.
+    async def never_present():
+        return False, "no device"
+
+    sup10 = Supervisor(
+        [spec("t-reclaim", 19812, die_after=1, backoff_initial=3.0, probe_extra=never_present)], bus
+    )
+    reclaim = sup10.get("t-reclaim")
+    reclaim.start()
+    saw_backoff = await until(sup10, lambda: reclaim.state == ServiceState.BACKOFF, timeout=15)
+    check("entered BACKOFF", saw_backoff, f"state={reclaim.state}")
+
+    outsider = subprocess.Popen(
+        [sys.executable, str(DUMMY), "19812"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    time.sleep(1.0)  # let it actually bind before the retry deadline lands
+
+    reclaimed = await until(sup10, lambda: reclaim.origin == ServiceOrigin.SUPERVISED, timeout=20)
+    check(
+        "reclaimed the port instead of colliding with it", reclaimed,
+        f"origin={reclaim.origin}, exit_code={reclaim.exit_code}",
+    )
+    check("outsider actually killed, not left running", outsider.poll() is not None)
+    check("takeover narrated in the terminal", "taking it over" in text_of(reclaim))
+    reclaim.stop()
+    if outsider.poll() is None:
+        outsider.kill()
+    await sup10.shutdown()
+
+    print("\n16. Supervisor.start() reclaims an external process at boot even when "
+          "probe_extra never passes")
+    # The same masking bug as #15, at the other call site: agent boot/restart
+    # used to gate detect_external() behind the compound probe too, so simply
+    # restarting the agent while a probe_extra check can never pass (adb, no
+    # phone attached) would collide with an already-running external process
+    # on the very first attempt instead of reclaiming it cleanly.
+    boot_outsider = subprocess.Popen(
+        [sys.executable, str(DUMMY), "19813"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    time.sleep(1.0)
+    sup11 = Supervisor(
+        [spec("t-boot-reclaim", 19813, probe_extra=never_present, autostart=True)], bus
+    )
+    await sup11.start()
+    boot_reclaim = sup11.get("t-boot-reclaim")
+    check(
+        "reclaimed at boot instead of colliding", boot_reclaim.origin == ServiceOrigin.SUPERVISED,
+        f"origin={boot_reclaim.origin}",
+    )
+    check("boot outsider actually killed", boot_outsider.poll() is not None)
+    boot_reclaim.stop()
+    await sup11.shutdown()
+    if boot_outsider.poll() is None:
+        boot_outsider.kill()
+
+    print("\n17. unhealthy_grace never restarts for a probe_extra-only failure (adb-no-device "
+          "shape)")
+    # The other real bug found live 2026-08-09, in the opposite direction from
+    # #15/#16: with no phone attached, adb's probe_extra can never pass even
+    # though the server itself is completely fine, and the old code treated
+    # that identically to a genuinely wedged process — restarting a perfectly
+    # healthy adb every `unhealthy_grace`, forever, for as long as the phone
+    # stays disconnected (confirmed live: restart_count climbing on a live
+    # machine with nothing actually wrong). `transport_ok` is what lets
+    # `_probe_alive` tell "the transport itself doesn't answer" (still
+    # restart-worthy, unchanged — see #10 above) apart from "the transport is
+    # fine, only the semantic check fails" (should never restart on its own).
+    # `start_grace=5.0` is deliberately generous, not tight — the real spawn
+    # handshake (subprocess creation, ConPTY setup, interpreter startup) was
+    # measured taking over 2s by itself under a loaded test run (16 prior
+    # sections' worth of process churn), so a tight grace window here would
+    # race real spawn latency instead of testing the fix. Waiting for the
+    # transport to genuinely come up before starting the "assert stability"
+    # timer (below) sidesteps that race entirely rather than trying to outguess
+    # it with bigger constants.
+    sup12 = Supervisor(
+        [spec("t-no-device", 19814, start_grace=5.0, unhealthy_grace=1.0, probe_interval=0.3,
+              probe_extra=never_present)],
+        bus,
+    )
+    no_device = sup12.get("t-no-device")
+    no_device.start()
+    transport_up = await until(
+        sup12, lambda: no_device.probe is not None and no_device.probe.transport_ok, timeout=15
+    )
+    check("dummy transport actually came up", transport_up, f"probe={no_device.probe}")
+    original_pid = no_device.pid
+    await pump(sup12, 3.0)  # comfortably past unhealthy_grace, transport already confirmed up
+    check(
+        "never restarted for a probe_extra-only failure", no_device.restart_count == 0,
+        f"restart_count={no_device.restart_count}",
+    )
+    check("same process the whole time", no_device.pid == original_pid and psutil.pid_exists(no_device.pid))
+    no_device.stop()
+    await sup12.shutdown()
+
     settings.SERVICE_SETTINGS_PATH.unlink(missing_ok=True)
     print(f"\n{sum(OK)}/{len(OK)} checks passed")
     return 0 if all(OK) else 1

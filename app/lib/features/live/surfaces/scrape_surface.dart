@@ -2,15 +2,36 @@ import 'package:flutter/material.dart';
 
 import '../../../core/agent_image.dart';
 import '../../../core/flow_event_models.dart';
+import '../../../core/theme/tokens.dart';
+import '../../../ui/motion.dart';
+import '../../../ui/status.dart';
+import '../../../ui/surfaces.dart';
+import '../../../ui/text.dart';
 import 'surface_common.dart';
 
 /// entity-scrape: the queued row strip resolves into either a reason chip
 /// (skipped, with the real numbers ARCHITECTURE §5.1 calls for) or the full
 /// profile-report composite (done) — most recent item large, history below.
+/// Which `run_summary.dart` counter bucket a subject's events resolve to —
+/// `null` for a subject still in progress (neither `scrape.done` nor
+/// `scrape.skipped` seen yet), which never matches an active filter.
+String? _bucketFor(List<FlowEvent> events) {
+  if (events.any((e) => e.kind == 'scrape.done')) return 'scraped';
+  if (events.any((e) => e.kind == 'scrape.skipped')) return 'failed';
+  return null;
+}
+
 class ScrapeSurface extends StatelessWidget {
-  const ScrapeSurface({super.key, required this.events});
+  const ScrapeSurface({super.key, required this.events, this.selectedVerdicts = const {}});
 
   final List<FlowEvent> events;
+
+  /// The active `run_summary.dart` counter-chip filter (`scraped`/`failed`)
+  /// — applies to the resolved history list only. The single still-in-
+  /// progress "large card" (if any) is a subject with no resolved bucket
+  /// yet, so it's shown regardless of the filter rather than disappearing
+  /// the instant a filter is toggled on.
+  final Set<String> selectedVerdicts;
 
   @override
   Widget build(BuildContext context) {
@@ -35,21 +56,33 @@ class ScrapeSurface extends StatelessWidget {
     // other finished card, not pinned above it just for being most recent.
     final latestInProgress = !latestEvents.any((e) => e.kind == 'scrape.done' || e.kind == 'scrape.skipped');
 
+    Iterable<String> filterHistory(Iterable<String> candidates) => selectedVerdicts.isEmpty
+        ? candidates
+        : candidates.where((s) => selectedVerdicts.contains(_bucketFor(bySubject[s]!)));
+
     if (!latestInProgress) {
-      return _HistoryWrap(subjects: subjects.reversed, bySubject: bySubject, theme: theme);
+      final history = filterHistory(subjects.reversed).toList();
+      if (history.isEmpty) {
+        return const SurfaceEmpty(message: 'No scrape activity matches the selected filter.');
+      }
+      return _HistoryWrap(subjects: history, bySubject: bySubject, theme: theme);
     }
 
+    final tokens = theme.tokens;
+    // Newest-first, skipping the subject already shown large above.
+    final history = filterHistory(subjects.reversed.skip(1)).toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          padding: EdgeInsets.fromLTRB(tokens.space.md, tokens.space.md, tokens.space.md, tokens.space.xs),
           child: _ScrapeCard(events: latestEvents, theme: theme, large: true),
         ),
         const Divider(height: 1),
         Expanded(
-          // Newest-first, skipping the subject already shown large above.
-          child: _HistoryWrap(subjects: subjects.reversed.skip(1), bySubject: bySubject, theme: theme),
+          child: history.isEmpty
+              ? const SurfaceEmpty(message: 'No resolved scrape activity matches the selected filter.')
+              : _HistoryWrap(subjects: history, bySubject: bySubject, theme: theme),
         ),
       ],
     );
@@ -73,16 +106,30 @@ class _HistoryWrap extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Wrap(
-        spacing: 12,
-        runSpacing: 12,
-        children: [
-          for (final subject in subjects)
-            SizedBox(width: 380, child: _ScrapeCard(events: bySubject[subject]!, theme: theme, large: false)),
-        ],
-      ),
+    final tokens = theme.tokens;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Computed rather than the old hardcoded 380 (D45, tuned to scrape
+        // alone) — a whole number of columns at whatever width this pane
+        // actually has, SCREENS §3's "no ragged gutter at any window size."
+        final width = wrapCardWidth(
+          constraints.maxWidth - tokens.space.md * 2,
+          minWidth: 320,
+          maxWidth: 460,
+          spacing: tokens.space.md,
+        );
+        return SingleChildScrollView(
+          padding: EdgeInsets.all(tokens.space.md),
+          child: Wrap(
+            spacing: tokens.space.md,
+            runSpacing: tokens.space.md,
+            children: [
+              for (final subject in subjects)
+                SizedBox(width: width, child: _ScrapeCard(events: bySubject[subject]!, theme: theme, large: false)),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -102,6 +149,7 @@ class _ScrapeCard extends StatelessWidget {
     final subject = (done ?? skipped ?? started)?.subject ?? '?';
     final root = rootFromImage((done ?? skipped ?? started)?.image);
     final inProgress = done == null && skipped == null;
+    final tokens = theme.tokens;
 
     final details = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -109,22 +157,23 @@ class _ScrapeCard extends StatelessWidget {
       children: [
         Text('@$subject', style: large ? theme.textTheme.titleMedium : theme.textTheme.bodyMedium),
         if (root != null)
-          Text('root: $root', style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
-        const SizedBox(height: 6),
+          Text('root: $root', style: theme.textTheme.labelSmall?.copyWith(color: tokens.content.secondary)),
+        SizedBox(height: tokens.space.xs),
         if (done != null) ...[
-          OutcomeBadge(label: 'SCRAPED', tone: BadgeTone.good),
-          const SizedBox(height: 6),
-          Text(
+          OutcomeBadge(label: 'SCRAPED', kind: StatusKind.good),
+          SizedBox(height: tokens.space.xs),
+          NumericText(
             'posts ${done.counters['posts']} · followers ${done.counters['followers']} · '
             'following ${done.counters['following']}',
-            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            role: TextRole.caption,
+            color: tokens.content.secondary,
           ),
         ] else if (skipped != null) ...[
-          OutcomeBadge(label: 'SKIPPED', tone: BadgeTone.bad),
-          const SizedBox(height: 6),
+          OutcomeBadge(label: 'SKIPPED', kind: StatusKind.bad),
+          SizedBox(height: tokens.space.xs),
           Text(skipped.reason ?? '', style: theme.textTheme.bodySmall),
         ] else
-          Text('scraping…', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+          Text('scraping…', style: theme.textTheme.bodySmall?.copyWith(color: tokens.content.secondary)),
       ],
     );
 
@@ -133,55 +182,59 @@ class _ScrapeCard extends StatelessWidget {
     // scan/classify's row crops are, not the tall scraped composite) — laid
     // out as a strip on top rather than squeezed into the portrait-oriented
     // Row every resolved card uses, which assumes a tall image.
-    if (large && inProgress) {
-      return ResultCardActions(
-        subject: (done ?? skipped ?? started)?.subject,
-        root: root,
-        child: Card(
-          margin: EdgeInsets.zero,
-          child: Padding(
-            padding: const EdgeInsets.all(10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                AgentImage(imageKey: started?.imageKey, width: 600, aspectRatio: 1080 / 198),
-                const SizedBox(height: 10),
-                details,
-              ],
-            ),
-          ),
+    final stripCard = ResultCardActions(
+      subject: (done ?? skipped ?? started)?.subject,
+      root: root,
+      child: AppCard(
+        padding: EdgeInsets.all(tokens.space.sm),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AgentImage(imageKey: started?.imageKey, width: 600, aspectRatio: 1080 / 198),
+            SizedBox(height: tokens.space.sm),
+            details,
+          ],
         ),
-      );
-    }
+      ),
+    );
 
     // Everything else is resolved: `done` has a real scraped composite
     // (portrait, ~1080×2000); `skipped` never gets one, so it still only
     // ever has the queued row crop — shown at its own real (wide) shape
     // rather than squeezed into the composite's, same reasoning as above.
-    return ResultCardActions(
+    final rowCard = ResultCardActions(
       subject: (done ?? skipped ?? started)?.subject,
       root: root,
-      child: Card(
-        margin: EdgeInsets.zero,
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(
-                width: large ? 140.0 : 90.0,
-                child: AgentImage(
-                  imageKey: (done ?? skipped ?? started)?.imageKey,
-                  width: large ? 200 : 100,
-                  aspectRatio: done != null ? 1080 / 2000 : 1080 / 198,
-                ),
+      child: AppCard(
+        padding: EdgeInsets.all(tokens.space.sm),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: large ? 140.0 : 90.0,
+              child: AgentImage(
+                imageKey: (done ?? skipped ?? started)?.imageKey,
+                width: large ? 200 : 100,
+                aspectRatio: done != null ? 1080 / 2000 : 1080 / 198,
               ),
-              const SizedBox(width: 12),
-              Expanded(child: details),
-            ],
-          ),
+            ),
+            SizedBox(width: tokens.space.sm),
+            Expanded(child: details),
+          ],
         ),
       ),
+    );
+
+    if (!large) return rowCard;
+
+    // The scrape before→after morph (SCREENS §3, ARCHITECTURE §9 — specified
+    // and never built until now, AUDIT §10): the same subject genuinely
+    // changing state, not decoration — `AnimatedReveal` cross-fades between
+    // the strip and row layouts the instant `inProgress` flips, keyed so it
+    // reads as a swap rather than two unrelated cards appearing/disappearing.
+    return AnimatedReveal(
+      visible: true,
+      child: KeyedSubtree(key: ValueKey(inProgress), child: inProgress ? stripCard : rowCard),
     );
   }
 }

@@ -3,8 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:ia_control_center/core/insights_models.dart';
+import 'package:ia_control_center/core/nav_state.dart';
 import 'package:ia_control_center/features/insights/insights_controller.dart';
 import 'package:ia_control_center/features/insights/insights_page.dart';
+import 'package:ia_control_center/features/library/library_controller.dart';
+import 'package:ia_control_center/features/overview/caps_tile.dart';
 
 /// Overflow is a paint-time error `flutter analyze` is blind to (D19's
 /// precedent, every UI checkpoint since has added one of these). CP 7.2's
@@ -49,6 +52,48 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('284 entities'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('FunnelTab: tapping a stage with a matching folder jumps to Library, tapping one without does nothing', (
+    tester,
+  ) async {
+    final summary = FunnelSummary(
+      entities: 284,
+      scanned: 123456,
+      private: 98765,
+      female: 54321,
+      male: 44444,
+      scraped: 12345,
+      followed: 1234,
+    );
+
+    final container = ProviderContainer(overrides: [funnelSummaryProvider.overrideWith((ref) async => summary)]);
+    addTearDown(container.dispose);
+
+    tester.view.physicalSize = const Size(1024, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: Scaffold(body: FunnelTab())),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // "Private" has no matching folder — tapping its label must not move
+    // the selected nav index at all.
+    await tester.tap(find.text('Private'));
+    await tester.pump();
+    expect(container.read(selectedNavIndexProvider), overviewIndex);
+
+    await tester.tap(find.text('Scanned'));
+    await tester.pump();
+    expect(container.read(selectedNavIndexProvider), libraryIndex);
+    expect(container.read(selectedFolderProvider), 'scanned');
     expect(tester.takeException(), isNull);
   });
 
@@ -155,6 +200,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('Scan — profiles'), findsOneWidget);
+    expect(find.byType(CapsTile), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 

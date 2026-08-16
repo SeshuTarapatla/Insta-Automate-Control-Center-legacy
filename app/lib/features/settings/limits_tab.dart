@@ -1,45 +1,77 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/config_models.dart';
+import '../../core/settings_nav.dart';
+import '../../core/theme/tokens.dart';
+import '../../ui/page.dart';
 import 'limit_card.dart';
 
 const _groupOrder = ['scan', 'scrape', 'follow', 'timing'];
-const _groupTitles = {
-  'scan': 'Scan',
-  'scrape': 'Scrape',
-  'follow': 'Follow',
-  'timing': 'Timings (seconds) — how long each trigger waits',
-};
+const _groupTitles = {'scan': 'Scan', 'scrape': 'Scrape', 'follow': 'Follow', 'timing': 'Timings'};
+const _groupCaptions = {'timing': 'seconds — how long each trigger waits'};
 
-class LimitsTab extends StatelessWidget {
+class LimitsTab extends ConsumerStatefulWidget {
   const LimitsTab({super.key, required this.config});
 
   final ConfigResponse config;
 
   @override
+  ConsumerState<LimitsTab> createState() => _LimitsTabState();
+}
+
+/// A `ConsumerStatefulWidget` since V2.12 — a palette "jump to its field"
+/// result (`highlightedConfigKeyProvider`) needs a real, per-field
+/// `GlobalKey` to scroll to, which a plain `StatelessWidget` has nowhere to
+/// keep across rebuilds.
+class _LimitsTabState extends ConsumerState<LimitsTab> {
+  final _cardKeys = <String, GlobalKey>{};
+
+  GlobalKey _keyFor(String name) => _cardKeys.putIfAbsent(name, () => GlobalKey());
+
+  void _scrollToHighlight(String? key) {
+    if (key == null) return;
+    final target = _cardKeys[key]?.currentContext;
+    if (target == null) return;
+    final duration = Theme.of(context).tokens.motion.reduced ? Duration.zero : const Duration(milliseconds: 250);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Scrollable.ensureVisible(target, duration: duration, alignment: 0.5);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final byGroup = <String, List<ConfigKeySchema>>{};
-    for (final key in config.schema) {
+    for (final key in widget.config.schema) {
       if (key.type != 'int') continue;
       byGroup.putIfAbsent(key.group, () => []).add(key);
     }
 
+    final tokens = Theme.of(context).tokens;
+    final highlighted = ref.watch(highlightedConfigKeyProvider);
+    ref.listen<String?>(highlightedConfigKeyProvider, (previous, next) => _scrollToHighlight(next));
+
     return ListView(
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.all(tokens.space.lg),
       children: [
         for (final group in _groupOrder)
           if (byGroup[group] case final keys?) ...[
-            Text(_groupTitles[group]!, style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 12),
+            SectionHeader(title: _groupTitles[group]!, caption: _groupCaptions[group]),
+            SizedBox(height: tokens.space.md),
             Wrap(
-              spacing: 16,
-              runSpacing: 16,
+              spacing: tokens.space.lg,
+              runSpacing: tokens.space.lg,
               children: [
                 for (final schema in keys)
-                  LimitCard(schema: schema, committedValue: config.values.limits[schema.name]!),
+                  LimitCard(
+                    key: _keyFor(schema.name),
+                    schema: schema,
+                    committedValue: widget.config.values.limits[schema.name]!,
+                    highlighted: highlighted == schema.name,
+                  ),
               ],
             ),
-            const SizedBox(height: 32),
+            SizedBox(height: tokens.space.xxl),
           ],
       ],
     );

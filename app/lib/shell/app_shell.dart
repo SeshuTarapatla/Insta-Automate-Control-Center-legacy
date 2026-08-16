@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/global_shortcuts.dart';
 import '../core/nav_state.dart';
 import '../core/onboarding.dart';
 import '../core/shortcuts_reference.dart';
+import '../core/theme/tokens.dart';
 import '../features/flows/flows_page.dart';
 import '../features/insights/insights_page.dart';
 import '../features/library/library_page.dart';
@@ -12,24 +13,11 @@ import '../features/live/live_page.dart';
 import '../features/overview/overview_page.dart';
 import '../features/services/services_page.dart';
 import '../features/settings/settings_page.dart';
+import '../ui/command/command_palette.dart';
+import '../ui/motion.dart';
 import 'connection_banner.dart';
+import 'nav_rail.dart';
 import 'title_bar.dart';
-
-class _Destination {
-  const _Destination(this.label, this.icon);
-  final String label;
-  final IconData icon;
-}
-
-const _destinations = [
-  _Destination('Overview', Icons.dashboard_outlined),
-  _Destination('Flows', Icons.account_tree_outlined),
-  _Destination('Live', Icons.sensors_outlined),
-  _Destination('Services', Icons.dns_outlined),
-  _Destination('Library', Icons.photo_library_outlined),
-  _Destination('Insights', Icons.insights_outlined),
-  _Destination('Settings', Icons.settings_outlined),
-];
 
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key});
@@ -65,19 +53,43 @@ class _AppShellState extends ConsumerState<AppShell> {
     final selected = ref.watch(selectedNavIndexProvider);
     ref.watch(onboardingControllerProvider).whenData(_maybeShowOnboarding);
 
+    // Every binding's activator/keys/description lives once in
+    // `core/global_shortcuts.dart` (V2.12) — this map supplies only the
+    // action per id, so a shortcut added there without a matching action
+    // here fails loudly (a missing map key) instead of silently drifting
+    // the way two independently hand-maintained lists could.
+    final actionsById = <GlobalShortcutId, VoidCallback>{
+      GlobalShortcutId.commandPalette: () => showCommandPalette(context),
+      GlobalShortcutId.shortcutsReference: () => showShortcutsReference(context),
+      GlobalShortcutId.navOverview: () => ref.read(selectedNavIndexProvider.notifier).select(overviewIndex),
+      GlobalShortcutId.navFlows: () => ref.read(selectedNavIndexProvider.notifier).select(flowsIndex),
+      GlobalShortcutId.navLive: () => ref.read(selectedNavIndexProvider.notifier).select(liveIndex),
+      GlobalShortcutId.navServices: () => ref.read(selectedNavIndexProvider.notifier).select(servicesIndex),
+      GlobalShortcutId.navLibrary: () => ref.read(selectedNavIndexProvider.notifier).select(libraryIndex),
+      GlobalShortcutId.navInsights: () => ref.read(selectedNavIndexProvider.notifier).select(insightsIndex),
+      GlobalShortcutId.navSettings: () => ref.read(selectedNavIndexProvider.notifier).select(settingsIndex),
+      GlobalShortcutId.toggleNavRail: () => ref.read(navRailCollapsedProvider.notifier).toggle(),
+    };
+
     return CallbackShortcuts(
-      // The first app-wide binding (everything else is page-scoped) — still
-      // reaches here from a focused text field the same way Ctrl+E does
+      // The first app-wide bindings (everything else is page-scoped) — still
+      // reach here from a focused text field the same way Ctrl+E does
       // (settings_page.dart's own comment on that), since shortcuts
       // propagate up the focus chain rather than being captured only at
       // the focused leaf.
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.slash, shift: true): () => showShortcutsReference(context),
-      },
+      bindings: {for (final s in globalShortcuts) s.activator: actionsById[s.id]!},
       child: Focus(
         autofocus: true,
         child: Scaffold(
-          backgroundColor: Colors.transparent,
+          // Was hardcoded `Colors.transparent` — correct only for Classic/
+          // Mica (whose `surface.canvas` genuinely is transparent, so the
+          // real Windows desktop shows through); every other theme's canvas
+          // is opaque, and painting it here (instead of always falling
+          // through to whatever's behind the window) is the fix for D106 —
+          // without it, the page background stayed whatever it always was
+          // regardless of theme, while cards correctly went dark, making
+          // every non-Classic/Mica dark theme look mismatched.
+          backgroundColor: Theme.of(context).tokens.surface.canvas,
           body: Column(
             children: [
               const TitleBar(),
@@ -86,33 +98,27 @@ class _AppShellState extends ConsumerState<AppShell> {
               Expanded(
                 child: Row(
                   children: [
-                    NavigationRail(
-                      selectedIndex: selected,
-                      onDestinationSelected: (i) => ref.read(selectedNavIndexProvider.notifier).select(i),
-                      labelType: NavigationRailLabelType.all,
-                      destinations: [
-                        for (final d in _destinations)
-                          NavigationRailDestination(
-                            icon: Icon(d.icon),
-                            label: Text(d.label),
-                          ),
-                      ],
-                    ),
+                    const AppNavRail(),
                     const VerticalDivider(width: 1),
                     Expanded(
                       // Rebuilt rather than kept alive: the agent's log ring is
                       // the source of truth for terminal output, so a pane that
                       // comes back replays from the server instead of holding
-                      // state here.
-                      child: switch (selected) {
-                        flowsIndex => const FlowsPage(),
-                        liveIndex => const LivePage(),
-                        servicesIndex => const ServicesPage(),
-                        libraryIndex => const LibraryPage(),
-                        insightsIndex => const InsightsPage(),
-                        settingsIndex => const SettingsPage(),
-                        _ => const OverviewPage(),
-                      },
+                      // state here. `PageTransition` (SCREENS.md §0) keys on
+                      // `selected` so a rail switch reads as a real transition
+                      // instead of a hard cut.
+                      child: PageTransition(
+                        transitionKey: selected,
+                        child: switch (selected) {
+                          flowsIndex => const FlowsPage(),
+                          liveIndex => const LivePage(),
+                          servicesIndex => const ServicesPage(),
+                          libraryIndex => const LibraryPage(),
+                          insightsIndex => const InsightsPage(),
+                          settingsIndex => const SettingsPage(),
+                          _ => const OverviewPage(),
+                        },
+                      ),
                     ),
                   ],
                 ),

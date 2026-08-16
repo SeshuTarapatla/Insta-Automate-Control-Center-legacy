@@ -4,8 +4,85 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_snack_bar.dart';
 import '../../core/library_models.dart';
+import '../../core/theme/tokens.dart';
+import '../../ui/icons.dart';
+import '../../ui/status.dart';
+import '../../ui/text.dart';
 import 'entity_yield_dialog.dart';
 import 'library_controller.dart';
+import 'review_page.dart';
+
+/// Review mode's own Apply (V2.13.2/D121) — unlike [applyLibrarySelection]'s
+/// whole-directory `POST /api/library/apply` (which reads the folder fresh
+/// and trashes everything *not* selected, so it can only run once every
+/// loaded image is decided), this only ever touches the images actually
+/// decided so far: [keep] moves via D90's explicit-pair `POST
+/// /api/library/move` (a no-op when [target] is the source folder — nothing
+/// to move, the image just stays put) and [discard] deletes via the
+/// explicit-path `POST /api/library/delete`. Undecided images are never
+/// named in either call, so a large folder can be worked in convenient
+/// chunks across sessions instead of needing to be finished in one sitting.
+/// Returns whether anything was actually applied.
+Future<bool> applyReviewDecisions(
+  BuildContext context,
+  WidgetRef ref, {
+  required String folder,
+  required String? entity,
+  required String target,
+  required List<LibraryImageEntry> keep,
+  required List<LibraryImageEntry> discard,
+}) async {
+  if (keep.isEmpty && discard.isEmpty) return false;
+  final movesNeeded = target != folder && keep.isNotEmpty;
+  if (movesNeeded) {
+    final targetFlat = ref.read(libraryFoldersControllerProvider).value?.where((f) => f.name == target).firstOrNull?.flat;
+    if (targetFlat == false && entity == null) {
+      AppSnackBar.show(context, '$target requires an entity', isError: true);
+      return false;
+    }
+  }
+
+  final parts = <String>[
+    if (keep.isNotEmpty)
+      movesNeeded ? 'Move ${keep.length} kept image(s) to "$target".' : 'Keep ${keep.length} image(s) here.',
+    if (discard.isNotEmpty) 'Send ${discard.length} discarded image(s) to the Recycle Bin.',
+    'Anything not yet decided is left untouched for later.',
+  ];
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Apply decided images?'),
+      content: Text(parts.join(' ')),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Apply')),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return false;
+
+  try {
+    if (movesNeeded) {
+      final targetFlat = ref.read(libraryFoldersControllerProvider).value?.where((f) => f.name == target).firstOrNull?.flat ?? true;
+      final moves = [
+        for (final entry in keep)
+          {'from': entry.path, 'to': targetFlat ? '$target/${entry.name}' : '$target/$entity/${entry.name}'},
+      ];
+      await ref.read(libraryImagesControllerProvider.notifier).move(moves);
+    }
+    if (discard.isNotEmpty) {
+      await ref.read(libraryImagesControllerProvider.notifier).delete(discard.map((e) => e.path).toList());
+    }
+    ref.read(librarySelectionProvider.notifier).clear();
+    if (context.mounted) {
+      AppSnackBar.show(context, 'Applied ${keep.length + discard.length} decided image(s) — the rest left for later.');
+    }
+    return true;
+  } on DioException catch (error) {
+    if (context.mounted) AppSnackBar.show(context, describeLibraryError(error), isError: true);
+    return false;
+  }
+}
 
 /// Shared by the toolbar's Delete button and the grid's Delete-key shortcut
 /// (`library_grid.dart`) so both paths confirm and report identically.
@@ -40,6 +117,60 @@ Future<void> deleteLibrarySelection(BuildContext context, WidgetRef ref, List<Li
   }
 }
 
+/// Shared by the toolbar's Apply button and review mode's Apply action
+/// (`review_page.dart`) so both confirm and report identically. Returns
+/// whether the apply actually happened, so review mode knows whether to
+/// close itself. `total` (not just `selected.length`) drives the confirm
+/// text since it's the whole `(folder, entity)` directory that gets swept —
+/// everything not in `selected` is trashed, not just what happened to be
+/// loaded client-side.
+Future<bool> applyLibrarySelection(
+  BuildContext context,
+  WidgetRef ref, {
+  required String folder,
+  required Set<String> selected,
+  required String target,
+}) async {
+  if (selected.isEmpty) return false;
+  final total = ref.read(libraryImagesControllerProvider).value?.total ?? selected.length;
+  final discarded = total - selected.length;
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Apply this review?'),
+      content: Text(
+        target == folder
+            ? 'Keep ${selected.length} selected image(s) here; send the other $discarded to the Recycle Bin.'
+            : 'Move ${selected.length} selected image(s) to "$target"; send the other $discarded to the '
+                  'Recycle Bin.',
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+        FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Apply')),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return false;
+
+  try {
+    final result = await ref.read(libraryImagesControllerProvider.notifier).apply(selected.toList());
+    ref.read(librarySelectionProvider.notifier).clear();
+    if (context.mounted) {
+      final where = result.target == folder ? 'kept' : 'moved to ${result.target}';
+      AppSnackBar.show(
+        context,
+        '${result.moved.length} $where, ${result.trashed.length} sent to the Recycle Bin'
+        '${result.errors.isEmpty ? '' : ' (${result.errors.length} failed)'}',
+        isError: result.errors.isNotEmpty,
+      );
+    }
+    return true;
+  } on DioException catch (error) {
+    if (context.mounted) AppSnackBar.show(context, describeLibraryError(error), isError: true);
+    return false;
+  }
+}
+
 /// Selection count + bulk actions + zoom, sitting above the grid. Apply and
 /// Delete both confirm first, naming exactly what happens — the same "the
 /// dialog names what actually stops" rule `flow_switch_confirm.dart` already
@@ -55,44 +186,6 @@ class LibraryToolbar extends ConsumerWidget {
     ref.read(librarySelectionProvider.notifier).selectAll(names);
   }
 
-  Future<void> _apply(BuildContext context, WidgetRef ref, Set<String> selected, String target) async {
-    final total = ref.read(libraryImagesControllerProvider).value?.total ?? selected.length;
-    final discarded = total - selected.length;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Apply this review?'),
-        content: Text(
-          target == folder
-              ? 'Keep ${selected.length} selected image(s) here; send the other $discarded to the Recycle Bin.'
-              : 'Move ${selected.length} selected image(s) to "$target"; send the other $discarded to the '
-                    'Recycle Bin.',
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Apply')),
-        ],
-      ),
-    );
-    if (confirmed != true || !context.mounted) return;
-
-    try {
-      final result = await ref.read(libraryImagesControllerProvider.notifier).apply(selected.toList());
-      ref.read(librarySelectionProvider.notifier).clear();
-      if (context.mounted) {
-        final where = result.target == folder ? 'kept' : 'moved to ${result.target}';
-        AppSnackBar.show(
-          context,
-          '${result.moved.length} $where, ${result.trashed.length} sent to the Recycle Bin'
-          '${result.errors.isEmpty ? '' : ' (${result.errors.length} failed)'}',
-          isError: result.errors.isNotEmpty,
-        );
-      }
-    } on DioException catch (error) {
-      if (context.mounted) AppSnackBar.show(context, describeLibraryError(error), isError: true);
-    }
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
@@ -104,8 +197,10 @@ class LibraryToolbar extends ConsumerWidget {
         ? const <LibraryImageEntry>[]
         : images.images.where((e) => selection.selected.contains(e.name)).toList();
 
+    final tokens = theme.tokens;
+
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      padding: EdgeInsets.fromLTRB(tokens.space.md, tokens.space.sm, tokens.space.md, tokens.space.xs),
       // A single Row here would overflow well before the app's 1024px floor:
       // breadcrumb + count + select-all + a selection cluster + zoom easily
       // exceeds what's left after the folder/entity rail columns. Row 1 keeps
@@ -127,39 +222,61 @@ class LibraryToolbar extends ConsumerWidget {
               if (entity != null)
                 IconButton(
                   tooltip: 'View entity across every stage',
-                  icon: const Icon(Icons.query_stats, size: 20),
+                  icon: AppIcon(AppIcons.insight, size: IconSize.md),
                   onPressed: () => showEntityYieldDialog(context, entity!),
                 ),
               if (images != null) ...[
-                const SizedBox(width: 12),
-                Text('${images.total}', style: theme.textTheme.bodySmall),
+                SizedBox(width: tokens.space.sm),
+                NumericText('${images.total}', role: TextRole.caption),
               ],
             ],
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: tokens.space.xs),
+          // Always rendered, Apply/Delete disabled rather than absent when
+          // nothing's selected (SCREENS.md §5a) — never hide a screen's
+          // primary action; a disabled button still answers "what does this
+          // screen let me do."
           Wrap(
-            spacing: 8,
-            runSpacing: 8,
+            spacing: tokens.space.xs,
+            runSpacing: tokens.space.xs,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
               TextButton(
                 onPressed: images == null || images.total == 0 ? null : () => _selectAll(ref),
                 child: const Text('Select all'),
               ),
-              if (selection.selected.isNotEmpty) ...[
-                Text('${selection.selected.length} selected', style: theme.textTheme.bodyMedium),
-                _MoveTargetPicker(folder: folder, target: target),
-                FilledButton.tonalIcon(
-                  onPressed: () => _apply(context, ref, selection.selected, target),
-                  icon: const Icon(Icons.done_all, size: 18),
-                  label: const Text('Apply'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: () => deleteLibrarySelection(context, ref, selectedEntries),
-                  icon: const Icon(Icons.delete_outline, size: 18),
-                  label: const Text('Delete'),
-                ),
-              ],
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  NumericText(selection.selected.length, role: TextRole.body, color: theme.textTheme.bodyMedium?.color),
+                  const Text(' selected'),
+                ],
+              ),
+              _MoveTargetPicker(folder: folder, target: target),
+              FilledButton.tonalIcon(
+                onPressed: selection.selected.isEmpty
+                    ? null
+                    : () => applyLibrarySelection(context, ref, folder: folder, selected: selection.selected, target: target),
+                icon: AppIcon(AppIcons.apply, size: IconSize.sm),
+                label: const Text('Apply'),
+              ),
+              OutlinedButton.icon(
+                onPressed: selection.selected.isEmpty ? null : () => deleteLibrarySelection(context, ref, selectedEntries),
+                icon: AppIcon(AppIcons.discard, size: IconSize.sm),
+                label: const Text('Delete'),
+              ),
+              // SCREENS.md §5b — the headline feature's toolbar entry point,
+              // alongside `R` (`library_page.dart`) and the nav rail/Flows
+              // ⚑ edge (which jump straight in with a chosen entity).
+              // Same enablement rule as Apply/Delete: visible always,
+              // disabled rather than absent with nothing loaded to review.
+              OutlinedButton.icon(
+                onPressed: images == null || images.total == 0
+                    ? null
+                    : () => openReviewMode(ref, folder: folder, entity: entity),
+                icon: AppIcon(AppIcons.review, size: IconSize.sm),
+                label: const Text('Review'),
+              ),
               const _ZoomControl(),
             ],
           ),
@@ -189,10 +306,7 @@ class _MoveTargetPicker extends ConsumerWidget {
             child: Text(f.name == folder ? '${f.name} (no move — just keep the selection)' : '→ ${f.name}'),
           ),
       ],
-      child: Chip(
-        label: Text(target == folder ? 'keep selection' : '→ $target'),
-        visualDensity: VisualDensity.compact,
-      ),
+      child: StatusChip(kind: StatusKind.neutral, label: target == folder ? 'keep selection' : '→ $target', dense: true),
     );
   }
 }
@@ -205,10 +319,10 @@ class _ZoomControl extends ConsumerWidget {
     final zoom = ref.watch(libraryZoomProvider);
     return SegmentedButton<LibraryZoom>(
       showSelectedIcon: false,
-      segments: const [
-        ButtonSegment(value: LibraryZoom.small, icon: Icon(Icons.apps, size: 16), tooltip: 'Small'),
-        ButtonSegment(value: LibraryZoom.medium, icon: Icon(Icons.grid_view, size: 16), tooltip: 'Medium'),
-        ButtonSegment(value: LibraryZoom.large, icon: Icon(Icons.grid_on, size: 16), tooltip: 'Large'),
+      segments: [
+        ButtonSegment(value: LibraryZoom.small, icon: AppIcon(AppIcons.densitySmall, size: IconSize.sm), tooltip: 'Small'),
+        ButtonSegment(value: LibraryZoom.medium, icon: AppIcon(AppIcons.densityMedium, size: IconSize.sm), tooltip: 'Medium'),
+        ButtonSegment(value: LibraryZoom.large, icon: AppIcon(AppIcons.densityLarge, size: IconSize.sm), tooltip: 'Large'),
       ],
       selected: {zoom},
       onSelectionChanged: (selected) => ref.read(libraryZoomProvider.notifier).set(selected.first),

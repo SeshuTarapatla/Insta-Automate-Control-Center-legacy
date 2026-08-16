@@ -31,8 +31,10 @@ import ia_agent.images as images
 import ia_agent.library.folders as folders
 import ia_agent.library.ops as ops
 import ia_agent.library.settings as library_settings
+from ia_agent.events.bus import EventBus
 from ia_agent.library.counts import LibraryCounts
 from ia_agent.library.folders import LibraryFolder
+from ia_agent.library.watcher import _periodic_reseed
 
 OK = []
 
@@ -142,6 +144,66 @@ def counts_checks() -> None:
         raised_flat = True
     check("unknown folder raises KeyError", raised_unknown)
     check("flat folder raises ValueError", raised_flat)
+
+
+async def periodic_reseed_checks() -> None:
+    """The 2026-08-11 live bug this guards against: a folder's watch can stop
+    delivering events entirely (a Windows change-notification buffer overflow
+    from a big batch move, observed on `gender_valid`/`gender_invalid`) with
+    no further touch() ever arriving to self-correct it. Simulated here by
+    writing straight to disk — bypassing `counts.touch()` the way a dead
+    watch would — and confirming the periodic reseed still catches up."""
+    print("\n26. periodic reseed repairs a folder whose watch silently stopped delivering")
+    counts = LibraryCounts()
+    counts.seed()
+    before_total = {f["name"]: f["total"] for f in counts.folders()}["scanned"]
+    make_jpg("scanned/reseed_probe/pic.jpg")  # written straight to disk, counts never told
+    by_name = {f["name"]: f for f in counts.folders()}
+    check("counts is stale before any reseed runs", by_name["scanned"]["total"] == before_total, str(by_name["scanned"]))
+
+    bus = EventBus()
+    queue = bus.subscribe()
+    reseed_task = asyncio.create_task(_periodic_reseed(bus, counts, interval=0.05))
+    try:
+        message = await asyncio.wait_for(queue.get(), timeout=3)
+    finally:
+        reseed_task.cancel()
+        try:
+            await reseed_task
+        except asyncio.CancelledError:
+            pass
+    check("a library.changes event was published", message["channel"] == "library.changes", str(message))
+    scanned_change = next((c for c in message["data"]["changes"] if c["folder"] == "scanned"), None)
+    check(
+        "it reports the corrected scanned total",
+        scanned_change is not None and scanned_change["count"] == before_total + 1,
+        str(scanned_change),
+    )
+    by_name_after = {f["name"]: f for f in counts.folders()}
+    check(
+        "the counts store itself is repaired, not just the broadcast",
+        by_name_after["scanned"]["total"] == before_total + 1,
+        str(by_name_after["scanned"]),
+    )
+
+    print("\n27. periodic reseed publishes nothing when there's no drift to repair")
+    bus2 = EventBus()
+    queue2 = bus2.subscribe()
+    reseed_task2 = asyncio.create_task(_periodic_reseed(bus2, counts, interval=0.05))
+    got_message = True
+    try:
+        await asyncio.wait_for(queue2.get(), timeout=0.3)
+    except asyncio.TimeoutError:
+        got_message = False
+    finally:
+        reseed_task2.cancel()
+        try:
+            await reseed_task2
+        except asyncio.CancelledError:
+            pass
+    check("no spurious publish when nothing changed", not got_message)
+
+    shutil.rmtree(FAKE_IA_DIR / "scanned/reseed_probe", ignore_errors=True)
 
 
 # ------------------------------------------------------------------ settings.py
@@ -279,6 +341,7 @@ def ops_checks() -> None:
 
 folders_checks()
 counts_checks()
+asyncio.run(periodic_reseed_checks())
 settings_checks()
 ops_checks()
 

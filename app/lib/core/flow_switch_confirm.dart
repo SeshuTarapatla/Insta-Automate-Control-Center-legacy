@@ -1,4 +1,10 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../features/settings/config_controller.dart';
+import 'app_snack_bar.dart';
+import 'scheduler_models.dart';
 
 /// What stops if you turn each flow off — shown in the confirmation dialog,
 /// because "are you sure?" without a consequence is not a real confirmation.
@@ -38,4 +44,17 @@ Future<bool> confirmFlowSwitch(BuildContext context, String key, bool turningOn)
     ),
   );
   return confirmed == true;
+}
+
+/// `flow_node.dart`'s own switch handler, lifted out (V2.12) so the command
+/// palette can toggle the same `ENTITY_*` key through the same confirm +
+/// apply path rather than a second copy of it.
+Future<void> toggleFlowSwitch(BuildContext context, WidgetRef ref, String flow, bool value) async {
+  final key = flowSwitchKey(flow);
+  if (!await confirmFlowSwitch(context, key, value)) return;
+  try {
+    await ref.read(configControllerProvider.notifier).applySwitch(key, value);
+  } on DioException {
+    if (context.mounted) AppSnackBar.show(context, 'Could not update $key', isError: true);
+  }
 }

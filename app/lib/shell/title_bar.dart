@@ -1,20 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:phosphor_flutter/phosphor_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 
-import '../core/app_theme.dart';
 import '../core/connection_state.dart';
+import '../core/dependency_models.dart';
 import '../core/shortcuts_reference.dart';
+import '../core/theme/tokens.dart';
 import '../core/window_work_area.dart';
 import '../features/notifications/notification_center.dart';
+import '../features/services/dependencies_controller.dart';
+import '../ui/command/command_palette.dart';
+import '../ui/icons.dart';
+import '../ui/overlays.dart';
+import '../ui/status.dart';
 
 class TitleBar extends ConsumerWidget {
   const TitleBar({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final status = ref.watch(connectionProvider);
     final theme = Theme.of(context);
+    final tokens = theme.tokens;
 
     return SizedBox(
       height: 40,
@@ -24,28 +31,31 @@ class TitleBar extends ConsumerWidget {
             child: DragToMoveArea(
               child: Row(
                 children: [
-                  const SizedBox(width: 12),
-                  Icon(
-                    Icons.hub_outlined,
-                    size: 18,
-                    color: theme.colorScheme.primary,
-                  ),
-                  const SizedBox(width: 8),
+                  SizedBox(width: tokens.space.sm),
+                  AppIcon(AppIcons.brand, size: IconSize.sm, color: theme.colorScheme.primary),
+                  SizedBox(width: tokens.space.xs),
                   Text(
                     'Insta-Automate Control Center',
                     style: theme.textTheme.labelLarge,
                   ),
-                  const SizedBox(width: 20),
-                  _StatusChip(status: status),
+                  SizedBox(width: tokens.space.xl),
+                  const _StatusCluster(),
                 ],
               ),
             ),
           ),
           IconButton(
+            tooltip: 'Command palette  (Ctrl+K)',
+            iconSize: 18,
+            visualDensity: VisualDensity.compact,
+            icon: AppIcon(AppIcons.command, size: IconSize.sm),
+            onPressed: () => showCommandPalette(context),
+          ),
+          IconButton(
             tooltip: 'Keyboard shortcuts  (?)',
             iconSize: 18,
             visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.help_outline),
+            icon: AppIcon(AppIcons.help, size: IconSize.sm),
             onPressed: () => showShortcutsReference(context),
           ),
           const NotificationCenter(),
@@ -56,34 +66,90 @@ class TitleBar extends ConsumerWidget {
   }
 }
 
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
-
-  final AgentConnection status;
+/// SCREENS.md §0 — five `StatusDot`s replacing the old single text chip
+/// (`'Agent: connected'`), each with a rich tooltip naming the component and
+/// its latency. Reads exactly the two providers the plan calls out —
+/// `connectionProvider` for the agent itself, `dependenciesControllerProvider`
+/// for the other four — no new agent endpoint.
+class _StatusCluster extends ConsumerWidget {
+  const _StatusCluster();
 
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final palette = theme.palette;
-    final (Color color, String label) = switch (status) {
-      AgentConnection.connected => (palette.statusGood, 'Agent: connected'),
-      AgentConnection.connecting => (palette.statusInfo, 'Agent: connecting'),
-      AgentConnection.disconnected => (theme.colorScheme.error, 'Agent: disconnected'),
-    };
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tokens = Theme.of(context).tokens;
+    final connection = ref.watch(connectionProvider);
+    final dependencies = ref.watch(dependenciesControllerProvider).value;
+
+    Dependency? dep(String key) => dependencies?.items.where((d) => d.key == key).firstOrNull;
 
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-        ),
-        const SizedBox(width: 6),
-        Text(label, style: theme.textTheme.bodySmall),
+        _agentDot(connection),
+        SizedBox(width: tokens.space.sm),
+        _depDot('k3s', dep('k3s')),
+        SizedBox(width: tokens.space.sm),
+        _depDot('Postgres', dep('postgres')),
+        SizedBox(width: tokens.space.sm),
+        _prefectDot(dep('prefect-server'), dep('prefect-pool')),
+        SizedBox(width: tokens.space.sm),
+        _depDot('Phone', dep('adb-device')),
       ],
     );
   }
+}
+
+StatusKind _kindOf(DependencyLevel level) => switch (level) {
+  DependencyLevel.ok => StatusKind.good,
+  DependencyLevel.warn => StatusKind.warn,
+  DependencyLevel.fail => StatusKind.bad,
+};
+
+Widget _statusDot({required StatusKind kind, required String title, required String detail, bool pulsing = false}) {
+  return AppTooltip(
+    rich: true,
+    title: title,
+    message: detail,
+    child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: StatusDot(kind: kind, pulsing: pulsing, size: 9),
+    ),
+  );
+}
+
+Widget _agentDot(AgentConnection connection) {
+  final (kind, detail) = switch (connection) {
+    AgentConnection.connected => (StatusKind.good, 'Connected'),
+    AgentConnection.connecting => (StatusKind.info, 'Connecting…'),
+    AgentConnection.disconnected => (StatusKind.bad, 'Disconnected'),
+  };
+  return _statusDot(kind: kind, title: 'Agent', detail: detail, pulsing: connection == AgentConnection.connecting);
+}
+
+Widget _depDot(String title, Dependency? dep) {
+  if (dep == null) return _statusDot(kind: StatusKind.neutral, title: title, detail: 'Checking…');
+  return _statusDot(kind: _kindOf(dep.level), title: title, detail: '${dep.detail}\n${dep.latencyMs.round()}ms');
+}
+
+Widget _prefectDot(Dependency? server, Dependency? pool) {
+  if (server == null && pool == null) return _statusDot(kind: StatusKind.neutral, title: 'Prefect', detail: 'Checking…');
+
+  final levels = <DependencyLevel>[
+    if (server != null) server.level,
+    if (pool != null) pool.level,
+  ];
+  final worst = levels.contains(DependencyLevel.fail)
+      ? DependencyLevel.fail
+      : levels.contains(DependencyLevel.warn)
+      ? DependencyLevel.warn
+      : DependencyLevel.ok;
+
+  final detail = [
+    if (server != null) 'Server: ${server.detail}',
+    if (pool != null) 'Work pool: ${pool.detail}',
+  ].join('\n');
+
+  return _statusDot(kind: _kindOf(worst), title: 'Prefect', detail: detail);
 }
 
 /// Maximize is faked via `setBounds` to the monitor's real work area instead
@@ -154,21 +220,23 @@ class _WindowButtonsState extends State<_WindowButtons> with WindowListener {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        _WindowButton(icon: Icons.remove, onPressed: windowManager.minimize),
+        _WindowButton(glyph: AppIcons.windowMinimize, tooltip: 'Minimize', onPressed: windowManager.minimize),
         _WindowButton(
-          icon: _maximized ? Icons.filter_none : Icons.crop_square,
+          glyph: _maximized ? AppIcons.windowRestore : AppIcons.windowMaximize,
+          tooltip: _maximized ? 'Restore' : 'Maximize',
           onPressed: _toggle,
         ),
-        _WindowButton(icon: Icons.close, onPressed: windowManager.close),
+        _WindowButton(glyph: AppIcons.windowClose, tooltip: 'Close', onPressed: windowManager.close),
       ],
     );
   }
 }
 
 class _WindowButton extends StatelessWidget {
-  const _WindowButton({required this.icon, required this.onPressed});
+  const _WindowButton({required this.glyph, required this.tooltip, required this.onPressed});
 
-  final IconData icon;
+  final PhosphorIconData Function(PhosphorIconsStyle) glyph;
+  final String tooltip;
   final Future<void> Function() onPressed;
 
   @override
@@ -176,7 +244,12 @@ class _WindowButton extends StatelessWidget {
     return SizedBox(
       width: 40,
       height: 40,
-      child: IconButton(iconSize: 16, icon: Icon(icon), onPressed: onPressed),
+      child: IconButton(
+        tooltip: tooltip,
+        iconSize: 16,
+        icon: AppIcon(glyph, size: IconSize.sm),
+        onPressed: onPressed,
+      ),
     );
   }
 }

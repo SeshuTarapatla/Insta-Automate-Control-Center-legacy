@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/app_snack_bar.dart';
-import '../../core/async_state_view.dart';
+import '../../ui/feedback.dart';
 import '../../core/file_opener.dart';
+import '../../core/settings_nav.dart';
+import '../../ui/page.dart';
+import 'appearance_tab.dart';
 import 'config_controller.dart';
 import 'config_file_bar.dart';
 import 'devices_tab.dart';
@@ -25,6 +28,11 @@ class SettingsPage extends ConsumerWidget {
     });
 
     final configAsync = ref.watch(configControllerProvider);
+    // `DefaultTabController` only ever builds its underlying `TabController`
+    // once per mount — a rebuild with a different `initialIndex` alone does
+    // nothing, so a palette-requested tab jump (V2.12) is keyed in via a
+    // fresh `Key`, forcing a real remount onto the requested tab.
+    final requestedTab = ref.watch(requestedSettingsTabProvider);
 
     return configAsync.stateView(
       describeError: (error) => 'Failed to load config: $error',
@@ -36,37 +44,30 @@ class SettingsPage extends ConsumerWidget {
         child: Focus(
           autofocus: true,
           child: DefaultTabController(
-            length: 5,
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
-                  child: ConfigFileBar(path: config.path),
-                ),
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 24),
-                  child: TabBar(
-                    tabs: [
-                      Tab(text: 'Flows'),
-                      Tab(text: 'Limits'),
-                      Tab(text: 'Queue'),
-                      Tab(text: 'Devices'),
-                      Tab(text: 'Ops'),
-                    ],
-                  ),
-                ),
-                Expanded(
-                  child: TabBarView(
-                    children: [
-                      SwitchesTab(config: config),
-                      LimitsTab(config: config),
-                      const QueueTab(),
-                      const DevicesTab(),
-                      const OpsTab(),
-                    ],
-                  ),
-                ),
+            key: ValueKey(requestedTab),
+            initialIndex: requestedTab,
+            length: 6,
+            child: AppPage(
+              title: 'Settings',
+              leading: ConfigFileBar(path: config.path),
+              tabs: const [
+                AppTab(label: 'Flows'),
+                AppTab(label: 'Limits'),
+                AppTab(label: 'Queue'),
+                AppTab(label: 'Devices'),
+                AppTab(label: 'Appearance'),
+                AppTab(label: 'Ops'),
               ],
+              body: TabBarView(
+                children: [
+                  SwitchesTab(config: config),
+                  LimitsTab(config: config),
+                  const QueueTab(),
+                  const DevicesTab(),
+                  const AppearanceTab(),
+                  const OpsTab(),
+                ],
+              ),
             ),
           ),
         ),

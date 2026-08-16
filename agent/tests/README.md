@@ -5,7 +5,7 @@ interesting behaviour is process lifecycle, which unit-level mocking would not h
 `origin = NONE` race in D9 and the launcher-restart-loop problem in D11 were both found here.
 
 ```
-uv run --project agent python agent/tests/test_supervisor.py     # 57 checks, engine level
+uv run --project agent python agent/tests/test_supervisor.py     # 80 checks, engine level
 uv run --project agent python agent/tests/test_e2e.py            # 32 checks, real app + real WS
 uv run --project agent python agent/tests/test_dependencies.py   # 26 checks, cluster faked out
 uv run --project agent python agent/tests/test_ui_contract.py    # 49 checks, payloads the app decodes

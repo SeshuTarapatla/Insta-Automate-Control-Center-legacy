@@ -21,6 +21,55 @@ class LibraryFolderInfo {
   );
 }
 
+/// SCREENS.md §5a-0 — the highest-impact single fix in the Library, found by
+/// observation, not visible in source: the grid rendered every folder at a
+/// near-square cell despite the seven folders holding two very different
+/// real image shapes (CLAUDE.md's `IA_DIR` table). `childAspectRatio` is
+/// width/height, so a portrait page (narrower than tall) is `< 1` and a row
+/// crop (much wider than tall) is `> 1`.
+///
+/// `entities`/`scraped`/`follow_queued` hold the full profile-page/composite
+/// shape (1080×2246, ~1080×2000) — portrait, ~1:2.08. `scanned`/
+/// `gender_valid`/`gender_invalid`/`scrape_queued` hold the 1080×198 row-crop
+/// shape — a 5.45:1 strip. Matching the cell to the content (instead of a
+/// near-square default) turns ~9 visible cells into ~40 in a strip folder at
+/// the same grid area — real review throughput, not just a cosmetic fix.
+const libraryFolderAspectRatio = {
+  'entities': 1 / 2.08,
+  'scraped': 1 / 2.08,
+  'follow_queued': 1 / 2.08,
+  'scanned': 5.45,
+  'gender_valid': 5.45,
+  'gender_invalid': 5.45,
+  'scrape_queued': 5.45,
+};
+
+double libraryAspectRatioFor(String? folder) => libraryFolderAspectRatio[folder] ?? 1.0;
+
+/// SCREENS.md §5a — the folder rail grouped by pipeline stage rather than
+/// seven undifferentiated rows, so it's visible at a glance which folders are
+/// actually the user's job (⚑) versus just pipeline state.
+class LibraryStageGroup {
+  const LibraryStageGroup({required this.label, required this.folders, this.review = false});
+
+  final String label;
+  final List<String> folders;
+
+  /// True for the review group — ARCHITECTURE §9's two human-in-the-loop
+  /// folders (`gender_valid`, `scraped`), the pipeline's actual bottleneck,
+  /// plus `gender_invalid` alongside them (the user's own call — a place to
+  /// catch classifier mistakes, not a pipeline gate the way the other two
+  /// are).
+  final bool review;
+}
+
+const libraryStageGroups = [
+  LibraryStageGroup(label: 'INTAKE', folders: ['entities']),
+  LibraryStageGroup(label: 'SCANNING', folders: ['scanned']),
+  LibraryStageGroup(label: 'YOUR REVIEW', folders: ['gender_invalid', 'gender_valid', 'scraped'], review: true),
+  LibraryStageGroup(label: 'QUEUED', folders: ['scrape_queued', 'follow_queued']),
+];
+
 /// One entity root inside a non-flat folder.
 class LibraryEntityInfo {
   const LibraryEntityInfo({required this.root, required this.count});
@@ -93,6 +142,24 @@ class DeleteResult {
 
   factory DeleteResult.fromJson(Map<String, dynamic> json) => DeleteResult(
     deleted: (json['deleted'] as List).cast<String>(),
+    errors: (json['errors'] as List).cast<String>(),
+  );
+}
+
+/// Result of `POST /api/library/move` — explicit `{from, to}` pairs (D90),
+/// reused by review mode's partial Apply (V2.13.2) since it, like mobile's
+/// paginated apply before it, can only ever see part of a folder and must
+/// never touch anything it wasn't explicitly told to move.
+class MoveResult {
+  const MoveResult({required this.moved, required this.alreadySynced, required this.errors});
+
+  final List<String> moved;
+  final List<String> alreadySynced;
+  final List<String> errors;
+
+  factory MoveResult.fromJson(Map<String, dynamic> json) => MoveResult(
+    moved: (json['moved'] as List).cast<String>(),
+    alreadySynced: (json['already_synced'] as List).cast<String>(),
     errors: (json['errors'] as List).cast<String>(),
   );
 }

@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/agent_client.dart';
 import '../../core/agent_ws.dart';
@@ -216,11 +217,41 @@ class LibraryImagesController extends AsyncNotifier<LibraryImagesState> {
     await reload();
     return DeleteResult.fromJson(response.data as Map<String, dynamic>);
   }
+
+  /// D90's explicit-pair `POST /api/library/move` — review mode's partial
+  /// Apply (V2.13.2) uses this instead of [apply] for the "keep, and the
+  /// target differs from the source" half of a decision, since [apply] reads
+  /// the whole directory and trashes everything not selected: exactly the
+  /// "partial set presented as the whole folder" bug D90 already caught on
+  /// mobile, just reachable here too once Apply no longer requires every
+  /// loaded image to be decided first.
+  Future<MoveResult> move(List<Map<String, String>> moves) async {
+    final dio = ref.read(agentClientProvider);
+    final response = await dio.post('/api/library/move', data: {'moves': moves});
+    await reload();
+    return MoveResult.fromJson(response.data as Map<String, dynamic>);
+  }
 }
 
 final libraryImagesControllerProvider = AsyncNotifierProvider<LibraryImagesController, LibraryImagesState>(
   LibraryImagesController.new,
 );
+
+/// Whether Library review mode (V2.10) is showing in place of the normal
+/// three-pane browse view. A plain flag rather than a route: V2.13.2/D121
+/// reversed D115's "full-screen route covering the title bar and nav rail
+/// entirely" so the nav rail stays reachable while reviewing — review mode
+/// is confined to the Library page's own content area instead, and
+/// `LibraryPage` reads this to decide what to render there.
+class LibraryReviewingNotifier extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void start() => state = true;
+  void stop() => state = false;
+}
+
+final libraryReviewingProvider = NotifierProvider<LibraryReviewingNotifier, bool>(LibraryReviewingNotifier.new);
 
 /// Per-folder "apply" promotion targets (CP 5.2's `library/settings.py`).
 class MoveTargetsController extends AsyncNotifier<Map<String, String>> {
@@ -251,11 +282,31 @@ enum LibraryZoom {
   final double tileWidth;
 }
 
+/// Persisted the same way `NavRailCollapsedNotifier` (`core/nav_state.dart`)
+/// and `ThemeController`'s appearance settings are — a synchronous default so
+/// the first frame never flashes an unstyled grid, the real saved value
+/// loading a moment later.
 class LibraryZoomNotifier extends Notifier<LibraryZoom> {
-  @override
-  LibraryZoom build() => LibraryZoom.medium;
+  static const _prefsKey = 'library_zoom';
 
-  void set(LibraryZoom zoom) => state = zoom;
+  @override
+  LibraryZoom build() {
+    _load();
+    return LibraryZoom.medium;
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_prefsKey);
+    final zoom = saved == null ? null : LibraryZoom.values.where((z) => z.name == saved).firstOrNull;
+    if (zoom != null) state = zoom;
+  }
+
+  Future<void> set(LibraryZoom zoom) async {
+    state = zoom;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsKey, zoom.name);
+  }
 }
 
 final libraryZoomProvider = NotifierProvider<LibraryZoomNotifier, LibraryZoom>(LibraryZoomNotifier.new);

@@ -21,15 +21,49 @@ class SelectedFlowNotifier extends Notifier<String> {
 final selectedFlowProvider = NotifierProvider<SelectedFlowNotifier, String>(SelectedFlowNotifier.new);
 
 class LiveState {
-  const LiveState({required this.flow, required this.runId, required this.logs, required this.events});
+  const LiveState({
+    required this.flow,
+    required this.runId,
+    required this.logs,
+    required this.events,
+    this.selectedVerdicts = const {},
+    this.runStartedAt,
+  });
 
   final String flow;
   final String? runId;
   final List<FlowRunLogEntry> logs;
   final List<FlowEvent> events;
 
-  LiveState copyWith({List<FlowRunLogEntry>? logs, List<FlowEvent>? events}) =>
-      LiveState(flow: flow, runId: runId, logs: logs ?? this.logs, events: events ?? this.events);
+  /// The active click-to-filter selection on this run's result-card list —
+  /// e.g. `{'MALE', 'FEMALE'}` on Classify, or `{'scraped'}` on Scrape.
+  /// Multi-select (any card matching any selected key shows), empty means
+  /// "show everything." Scoped to the currently displayed run: reset
+  /// whenever the flow switches or a new run starts, same lifetime as
+  /// [events] itself.
+  final Set<String> selectedVerdicts;
+
+  /// The run's real start time, from `GET /api/flow-runs/{id}` (Prefect's
+  /// own record) — not a client-side "when did the app first notice this
+  /// run" guess, which would drift from the actual trigger time by however
+  /// long the next heartbeat/poll took to reach this screen. Powers the
+  /// header ribbon's elapsed timer (V2.8/SCREENS §3); `null` before the
+  /// fetch resolves or when there's no run to time.
+  final DateTime? runStartedAt;
+
+  LiveState copyWith({
+    List<FlowRunLogEntry>? logs,
+    List<FlowEvent>? events,
+    Set<String>? selectedVerdicts,
+    DateTime? runStartedAt,
+  }) => LiveState(
+    flow: flow,
+    runId: runId,
+    logs: logs ?? this.logs,
+    events: events ?? this.events,
+    selectedVerdicts: selectedVerdicts ?? this.selectedVerdicts,
+    runStartedAt: runStartedAt ?? this.runStartedAt,
+  );
 }
 
 /// Logs and events for whichever flow is selected, scoped to that flow's
@@ -67,13 +101,20 @@ class LiveController extends AsyncNotifier<LiveState> {
 
     final logs = runId == null ? const <FlowRunLogEntry>[] : await _fetchLogs(runId);
     final events = await _fetchEvents(flow, runId);
-    return LiveState(flow: flow, runId: runId, logs: logs, events: events);
+    final startedAt = runId == null ? null : await _fetchRunStartedAt(runId);
+    return LiveState(flow: flow, runId: runId, logs: logs, events: events, runStartedAt: startedAt);
   }
 
   Future<List<FlowRunLogEntry>> _fetchLogs(String runId) async {
     final dio = ref.read(agentClientProvider);
     final response = await dio.get('/api/flow-runs/$runId/logs');
     return FlowRunLogsReplay.fromJson(response.data as Map<String, dynamic>).entries;
+  }
+
+  Future<DateTime?> _fetchRunStartedAt(String runId) async {
+    final dio = ref.read(agentClientProvider);
+    final response = await dio.get('/api/flow-runs/$runId');
+    return FlowRunSummary.fromJson(response.data as Map<String, dynamic>).startTime;
   }
 
   Future<List<FlowEvent>> _fetchEvents(String flow, String? runId) async {
@@ -91,13 +132,28 @@ class LiveController extends AsyncNotifier<LiveState> {
     final newRunId = snapshot.flows[current.flow]?.lastRun?.id;
     if (newRunId == _runId) return;
     _runId = newRunId;
-    _reload(current.flow, newRunId);
+    // A genuinely new run starting — clear any active counter filter along
+    // with the stale event/log history it was scoped to.
+    _reload(current.flow, newRunId, resetFilter: true);
   }
 
-  Future<void> _reload(String flow, String? runId) async {
+  Future<void> _reload(String flow, String? runId, {bool resetFilter = false}) async {
     final logs = runId == null ? const <FlowRunLogEntry>[] : await _fetchLogs(runId);
     final events = await _fetchEvents(flow, runId);
-    state = AsyncValue.data(LiveState(flow: flow, runId: runId, logs: logs, events: events));
+    final startedAt = runId == null ? null : await _fetchRunStartedAt(runId);
+    final selectedVerdicts = resetFilter ? const <String>{} : state.value?.selectedVerdicts ?? const {};
+    state = AsyncValue.data(
+      LiveState(flow: flow, runId: runId, logs: logs, events: events, selectedVerdicts: selectedVerdicts, runStartedAt: startedAt),
+    );
+  }
+
+  /// Toggles a counter's verdict/bucket key in or out of the active filter.
+  void toggleVerdict(String key) {
+    final current = state.value;
+    if (current == null) return;
+    final next = {...current.selectedVerdicts};
+    if (!next.remove(key)) next.add(key);
+    state = AsyncValue.data(current.copyWith(selectedVerdicts: next));
   }
 
   void _handleWsEvent(AgentEvent wsEvent) {

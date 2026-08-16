@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/async_state_view.dart';
+import '../../ui/feedback.dart';
 import '../../core/force_run.dart';
 import '../../core/scheduler_models.dart';
+import '../../core/theme/tokens.dart';
+import '../../ui/icons.dart';
+import '../../ui/layout.dart';
+import '../../ui/page.dart';
+import '../../ui/surfaces.dart';
 import '../flows/flows_controller.dart';
 import 'device_bar.dart';
 import 'live_controller.dart';
@@ -15,17 +20,13 @@ import 'surfaces/ingest_surface.dart';
 import 'surfaces/scan_surface.dart';
 import 'surfaces/scrape_surface.dart';
 
-/// The showpiece screen (CP 4.4): a log console that follows whichever run is
-/// selected, a flow-specific visualization surface, and a run summary with
-/// counters. Two columns (D42/D44's follow-up) — the visualization surface is
-/// a *fixed*-width right column, since its cards already wrap to use
-/// whatever width they're given (D44) rather than needing to keep growing;
-/// the extra room instead goes to the log console, which genuinely benefits
-/// from more width per line. The left column stretches to fill the rest:
-/// the summary (a handful of rows plus counters) sizes to its own content at
-/// the top rather than stretching to fill it and leaving the rest blank, and
-/// the log console takes whatever height is left below it. Device control
-/// lives in the header row instead, as a compact `DeviceBar` (D46).
+/// The showpiece screen (CP 4.4, reworked V2.8/SCREENS §3): a log console
+/// that follows whichever run is selected and a flow-specific visualization
+/// surface, side by side in a `ResizableSplit` — no more hardcoded 420px
+/// column tuned to one flow (D45's own comment flagged this). `RunSummary`
+/// dissolved from its own card into a one-line header strip (phase, elapsed
+/// timer, live counters); device control stays in the header row as a
+/// compact `DeviceBar` (D46).
 class LivePage extends ConsumerStatefulWidget {
   const LivePage({super.key});
 
@@ -44,6 +45,12 @@ class _LivePageState extends ConsumerState<LivePage> {
   // subsequent `flows.state` broadcast (`ref.listen` below), never by its
   // own rebuild.
   bool _didInitialCatchUp = false;
+
+  // Which pane (if either) is maximised to fill the whole body — the
+  // "just show me the images" / "just show me the logs" modes SCREENS §3
+  // calls for, one click away in either direction via each pane's own
+  // ⤢ button. `null` means the normal side-by-side split.
+  String? _expandedPane;
 
   // Always follows whichever flow is running - a manual tab click only ever
   // shows something *until the next relevant snapshot*, it does not opt out
@@ -82,123 +89,171 @@ class _LivePageState extends ConsumerState<LivePage> {
     }
 
     final selectedFlow = ref.watch(selectedFlowProvider);
+    final tokens = Theme.of(context).tokens;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
-          child: Row(
-            children: [
-              Expanded(
-                child: Wrap(
-                  spacing: 8,
-                  children: [
-                    for (final flow in flowOrder)
-                      ChoiceChip(
-                        label: Text(flowTitle[flow] ?? flow),
-                        selected: selectedFlow == flow,
-                        onSelected: (_) => ref.read(selectedFlowProvider.notifier).select(flow),
-                      ),
-                  ],
-                ),
-              ),
-              // Trigger now / Stop the selected flow right from here — the
-              // point of these living in the header (not just on the Flows
-              // screen) is not having to switch tabs when the goal is
-              // simply "trigger this and watch its logs," or "something's
-              // wrong, stop it now" (D69 — added after a real incident with
-              // no way to do the latter short of uninstalling the release).
-              if (snapshot?.flows[selectedFlow] case final state?)
-                Padding(
-                  padding: const EdgeInsets.only(right: 12),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (state.phase == 'running' && state.lastRun != null)
-                        Padding(
-                          padding: const EdgeInsets.only(right: 8),
-                          child: OutlinedButton(
-                            style: OutlinedButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
-                            onPressed: () => stopFlowRun(context, ref, state),
-                            child: const Text('Stop'),
-                          ),
-                        ),
-                      OutlinedButton(
-                        onPressed: () => forceRunFlow(context, ref, state),
-                        child: const Text('Trigger now'),
-                      ),
-                      if (state.flow == 'entity-follow')
-                        Padding(
-                          padding: const EdgeInsets.only(left: 8),
-                          child: OutlinedButton(
-                            onPressed: () => reduceReserveFlow(context, ref, state),
-                            child: const Text('Reduce reserve'),
-                          ),
-                        ),
-                    ],
+    return AppPage(
+      title: 'Live',
+      leading: Row(
+        children: [
+          Expanded(
+            child: Wrap(
+              spacing: tokens.space.xs,
+              children: [
+                for (final flow in flowOrder)
+                  ChoiceChip(
+                    label: Text(flowTitle[flow] ?? flow),
+                    selected: selectedFlow == flow,
+                    onSelected: (_) => ref.read(selectedFlowProvider.notifier).select(flow),
                   ),
-                )
-              else
-                // Before the first heartbeat arrives there's nothing to act
-                // on yet — say so instead of just not rendering the controls,
-                // which read as a layout glitch rather than "still loading."
-                Padding(
-                  padding: const EdgeInsets.only(right: 12),
-                  child: Text(
-                    'Waiting for scheduler data…',
-                    style: Theme.of(
-                      context,
-                    ).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
-                  ),
-                ),
-              // Device control lives here, not in RunSummary's body (D46) —
-              // this row already has the height to spare next to the flow
-              // chips, and it frees the whole left column below for the log
-              // console instead of competing with it for space.
-              const DeviceBar(),
-            ],
+              ],
+            ),
           ),
-        ),
-        const Divider(height: 1),
-        Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Card(margin: const EdgeInsets.fromLTRB(12, 12, 12, 6), child: const RunSummary()),
-                    Expanded(
-                      child: Card(margin: const EdgeInsets.fromLTRB(12, 6, 12, 12), child: const LogConsole()),
+          // Trigger now / Stop the selected flow right from here — the
+          // point of these living in the header (not just on the Flows
+          // screen) is not having to switch tabs when the goal is
+          // simply "trigger this and watch its logs," or "something's
+          // wrong, stop it now" (D69 — added after a real incident with
+          // no way to do the latter short of uninstalling the release).
+          if (snapshot?.flows[selectedFlow] case final state?)
+            Padding(
+              padding: EdgeInsets.only(right: tokens.space.md),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (state.phase == 'running' && state.lastRun != null)
+                    Padding(
+                      padding: EdgeInsets.only(right: tokens.space.sm),
+                      child: OutlinedButton(
+                        style: OutlinedButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+                        onPressed: () => stopFlowRun(context, ref, state),
+                        child: const Text('Stop'),
+                      ),
                     ),
-                  ],
-                ),
+                  OutlinedButton(
+                    onPressed: () => forceRunFlow(context, ref, state),
+                    child: const Text('Trigger now'),
+                  ),
+                  if (state.flow == 'entity-follow')
+                    Padding(
+                      padding: EdgeInsets.only(left: tokens.space.sm),
+                      child: OutlinedButton(
+                        onPressed: () => reduceReserveFlow(context, ref, state),
+                        child: const Text('Reduce reserve'),
+                      ),
+                    ),
+                ],
               ),
-              // Fixed, not Expanded, and tightly sized rather than round —
-              // the visualization surface's cards already wrap to fill
-              // whatever width they're given (D44), so any width beyond what
-              // a card actually needs just becomes more of the same wasted
-              // space D44 was fixing, not more information. 420 is scrape's
-              // own card (D44's 380px `_ScrapeCard`) plus the surface's 16px
-              // padding on each side plus a few px for the scrollbar gutter
-              // — exactly one column, no leftover. Deliberately tuned to
-              // scrape, the only flow tested so far (D45) — classify's cards
-              // are narrower (fit fine) and follow's are wider (420, D44),
-              // so this may need revisiting once follow/classify get a real
-              // test; nothing here assumes scrape's number is universal.
-              SizedBox(
-                width: 420,
-                child: Card(
-                  margin: const EdgeInsets.symmetric(vertical: 12),
+            )
+          else
+            // Before the first heartbeat arrives there's nothing to act
+            // on yet — say so instead of just not rendering the controls,
+            // which read as a layout glitch rather than "still loading."
+            Padding(
+              padding: EdgeInsets.only(right: tokens.space.md),
+              child: Text(
+                'Waiting for scheduler data…',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: tokens.content.secondary),
+              ),
+            ),
+          // Device control lives here, not in RunSummary's body (D46) —
+          // this row already has the height to spare next to the flow
+          // chips, and it frees the whole left column below for the log
+          // console instead of competing with it for space.
+          const DeviceBar(),
+        ],
+      ),
+      body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // `RunSummary` dissolved from its own card into this one-line
+          // strip (V2.8/SCREENS §3) — what used to be ~180px of scrolling
+          // label/value rows is now phase + elapsed + live counters.
+          const RunSummary(),
+          SizedBox(height: tokens.space.sm),
+          Expanded(
+            child: switch (_expandedPane) {
+              'logs' => _Pane(
+                title: 'Logs',
+                expanded: true,
+                onToggleExpand: () => setState(() => _expandedPane = null),
+                child: const LogConsole(),
+              ),
+              'viz' => _Pane(
+                title: 'Visualization',
+                expanded: true,
+                onToggleExpand: () => setState(() => _expandedPane = null),
+                child: const _VisualizationSurface(),
+              ),
+              _ => ResizableSplit(
+                persistKey: 'live.split',
+                initialFirstSize: 480,
+                minFirst: 320,
+                minSecond: 360,
+                first: _Pane(
+                  title: 'Logs',
+                  expanded: false,
+                  onToggleExpand: () => setState(() => _expandedPane = 'logs'),
+                  child: const LogConsole(),
+                ),
+                second: _Pane(
+                  title: 'Visualization',
+                  expanded: false,
+                  onToggleExpand: () => setState(() => _expandedPane = 'viz'),
                   child: const _VisualizationSurface(),
                 ),
               ),
-            ],
+            },
           ),
-        ),
-      ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A pane's frame: a slim title bar (name + the ⤢ expand/restore toggle)
+/// over its content, inside one `AppCard` — replaces the bare
+/// `AppCard(child: LogConsole())` / fixed-420px visualization card the
+/// two panes used to be wrapped in directly (V2.8/SCREENS §3).
+class _Pane extends StatelessWidget {
+  const _Pane({required this.title, required this.expanded, required this.onToggleExpand, required this.child});
+
+  final String title;
+  final bool expanded;
+  final VoidCallback onToggleExpand;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final tokens = theme.tokens;
+    return AppCard(
+      padding: EdgeInsets.zero,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: tokens.space.sm, vertical: tokens.space.xs),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    title.toUpperCase(),
+                    style: theme.textTheme.labelMedium?.copyWith(color: tokens.content.secondary, letterSpacing: 0.5),
+                  ),
+                ),
+                IconButton(
+                  tooltip: expanded ? 'Restore split' : 'Expand',
+                  icon: AppIcon(expanded ? AppIcons.collapse : AppIcons.expand, size: IconSize.sm),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onToggleExpand,
+                ),
+              ],
+            ),
+          ),
+          const AppDivider(),
+          Expanded(child: child),
+        ],
+      ),
     );
   }
 }
@@ -212,9 +267,9 @@ class _VisualizationSurface extends ConsumerWidget {
     return async.stateView(
       data: (state) => switch (state.flow) {
         'entity-scan' => ScanSurface(events: state.events),
-        'entity-classify' => ClassifySurface(events: state.events),
-        'entity-scrape' => ScrapeSurface(events: state.events),
-        'entity-follow' => FollowSurface(events: state.events),
+        'entity-classify' => ClassifySurface(events: state.events, selectedVerdicts: state.selectedVerdicts),
+        'entity-scrape' => ScrapeSurface(events: state.events, selectedVerdicts: state.selectedVerdicts),
+        'entity-follow' => FollowSurface(events: state.events, selectedVerdicts: state.selectedVerdicts),
         'entity-ingest' => IngestSurface(events: state.events),
         _ => EmptyView(icon: Icons.visibility_off_outlined, title: 'No visualization for ${state.flow}'),
       },
